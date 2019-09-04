@@ -80,7 +80,7 @@ int __itt_init_ittlib(const char *, __itt_group_id);
 #define SPDK_BDEV_QOS_MIN_BYTES_PER_SEC		(1024 * 1024)
 #define SPDK_BDEV_QOS_LIMIT_NOT_DEFINED		UINT64_MAX
 
-#define SPDK_BDEV_POOL_ALIGNMENT 512
+#define SPDK_BDEV_POOL_ALIGNMENT 4096	//512 gives "larger than allowed" errors
 
 static const char *qos_conf_type[] = {"Limit_IOPS",
 				      "Limit_BPS", "Limit_Read_BPS", "Limit_Write_BPS"
