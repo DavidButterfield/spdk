@@ -57,6 +57,12 @@ ifeq ($(OS),Linux)
 BLOCKDEV_MODULES_LIST += ftl
 BLOCKDEV_MODULES_LIST += bdev_aio
 SYS_LIBS += -laio
+
+BLOCKDEV_MODULES_LIST += bdev_tcmur
+# Get the whole library because it is used by dynamically-loadable tcmu-runner handlers
+LIBTCMUR = $(TCMUR_ROOT_DIR)/libtcmur/libtcmur.a
+SYS_LIBS += -Wl,--whole-archive $(LIBTCMUR) -Wl,--no-whole-archive -export-dynamic
+
 ifeq ($(CONFIG_VIRTIO),y)
 BLOCKDEV_MODULES_LIST += bdev_virtio virtio
 endif
