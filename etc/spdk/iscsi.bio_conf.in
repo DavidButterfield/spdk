@@ -1,0 +1,71 @@
+# iSCSI target configuration file using tcmu-runner storage handlers
+
+[Global]
+  #SharedMemoryID 0
+  #NoPci Yes
+  #TpointGroupMask 0x0
+
+[Bdev]
+  #BdevIoPoolSize 65536
+  #BdevIoCacheSize 256
+
+#XXX NOTE: Only handler_ram.so and handler_file.so have been tested so far.
+#XXX       Need to try an async handler (nr_threads == 0)!
+
+# Format for tcmu-runner handler devices:
+#	TCMUR <tcmur-minor-number> <dev-name> <tcmur-cfg-str>
+# tcmur-minor-number should be less than 256 and unique across TCMUR instances.
+# dev-name is arbitrary but should be unique across instances.
+# tcmu-runner handler name is derived from the first segment of tcmur-cfg-str.
+[TCMUR]
+  TCMUR 0 ram_a /ram/tmp/tcmur_ram00
+  TCMUR 1 ram_b /ram/tmp/tcmur_ram01
+  TCMUR 2 file_a /file//tmp/tcmur_file00
+  TCMUR 3 file_b /file//tmp/tcmur_file01
+
+[BIO]
+  BIO bio0 /UMCfuse/dev/ram_b
+  BIO bio1 /UMCfuse/dev/file_b
+
+[Malloc]
+  NumberOfLuns 1
+  LunSizeInMB 128
+  BlockSize 4096
+
+[AIO]
+  AIO /tmp/myfile AIO2 4096
+
+[iSCSI]
+  NodeBase "iqn.2016-06.io.spdk"
+  AuthFile /usr/local/etc/spdk/auth.conf
+  Timeout 30
+  DiscoveryAuthMethod Auto
+  #MaxSessions 128
+  #MaxConnectionsPerSession 2
+  DefaultTime2Wait 2
+  DefaultTime2Retain 60
+  FirstBurstLength 8192
+  ImmediateData Yes
+  ErrorRecoveryLevel 0
+
+[PortalGroup1]
+  Portal DA1 192.168.1.37:3260
+
+[InitiatorGroup1]
+  InitiatorName ANY
+  Netmask 192.168.1.0/24
+
+[TargetNode1]
+  TargetName disk1
+  TargetAlias "Data Disk1"
+  Mapping PortalGroup1 InitiatorGroup1
+  AuthMethod Auto
+  AuthGroup AuthGroup1
+  UseDigest Auto
+  QueueDepth 64
+  LUN0 Malloc0
+  LUN1 AIO2
+  LUN2 ram_a
+  LUN3 file_a
+  LUN4 bio0
+  LUN5 bio1

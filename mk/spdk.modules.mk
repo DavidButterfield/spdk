@@ -58,10 +58,15 @@ BLOCKDEV_MODULES_LIST += ftl
 BLOCKDEV_MODULES_LIST += bdev_aio
 SYS_LIBS += -laio
 
-BLOCKDEV_MODULES_LIST += bdev_tcmur
 # Get the whole library because it is used by dynamically-loadable tcmu-runner handlers
-LIBTCMUR = $(TCMUR_ROOT_DIR)/libtcmur/libtcmur.a
-SYS_LIBS += -Wl,--whole-archive $(LIBTCMUR) -Wl,--no-whole-archive -export-dynamic
+BLOCKDEV_MODULES_LIST += bdev_tcmur
+BLOCKDEV_MODULES_LIST += bdev_bio
+# LIBTCMUR = $(TCMUR_ROOT_DIR)/libtcmur/libtcmur.a
+# SYS_LIBS += -Wl,--whole-archive $(LIBTCMUR) -Wl,--no-whole-archive -export-dynamic
+LIBUMC = $(UMC_ROOT_DIR)/usermode_lib.a
+SYS_LIBS += -Wl,--whole-archive $(LIBUMC) -Wl,--no-whole-archive -export-dynamic
+SYS_LIBS += $(MTE_ROOT_DIR)/libmte.a
+SYS_LIBS += -lfuse	#XXX
 
 ifeq ($(CONFIG_VIRTIO),y)
 BLOCKDEV_MODULES_LIST += bdev_virtio virtio
