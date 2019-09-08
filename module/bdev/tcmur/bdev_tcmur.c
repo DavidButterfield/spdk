@@ -31,6 +31,7 @@
  *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#include "spdk/config.h" 	/* for SPDK_CONFIG_DRBD */
 
 #define impl_name			tcmur
 #define impl_name_str			"tcmur"
@@ -38,6 +39,10 @@
 #define create_impl_bdev		create_tcmur_bdev
 #define bdev_impl_delete		bdev_tcmur_delete
 #define SPDK_LOG_IMPL			SPDK_LOG_TCMUR
+
+extern int UMC_init(const char * procname);
+extern int UMC_exit(void);
+extern void DRBD_init(void);
 
 /* Hacks to work around kernel/user #include conflicts */
 #define  NO_UMC_SOCKETS
@@ -47,8 +52,9 @@
 #undef ntohl
 #undef ntohs
 #include "bdev_tcmur.h"
-extern error_t UMC_init(const char * procname);
+#ifdef SPDK_CONFIG_DRBD
 #include "mtelib.h"
+#endif
 
 #include "spdk/stdinc.h"
 #include "spdk/barrier.h"
@@ -70,9 +76,10 @@ struct bdev_impl_io_channel {
 };
 
 struct bdev_impl_task {
-	struct tcmur_cmd		cmd;	    /* tcmur command */
+	struct libtcmur_task		tcmur_task;
 	struct bdev_impl_io_channel	*ch;
 	struct iovec			*iov;
+	int				sts;	/* return status from tcmur handler */
 	TAILQ_ENTRY(bdev_impl_task)	link;
 };
 
@@ -154,29 +161,54 @@ bdev_impl_close(struct file_disk *disk)
 	return 0;
 }
 
-/* Completion callback from libtcmur */
+/* Issue callback to our requestor */
+static inline void
+do_callback(void * arg)
+{
+	struct tcmur_cmd * cmd = arg;
+	int status;
+	struct bdev_impl_task * bdev_task;
+	bdev_task = container_of(cmd, struct bdev_impl_task, tcmur_task.tcmur_cmd);
+
+	status = bdev_task->sts == TCMU_STS_OK          ? SPDK_BDEV_IO_STATUS_SUCCESS :
+		 bdev_task->sts == TCMU_STS_NO_RESOURCE ? SPDK_BDEV_IO_STATUS_NOMEM :
+					                  SPDK_BDEV_IO_STATUS_FAILED;
+
+	bdev_task->ch->io_inflight--;
+
+	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "%s: %p SPDK status %d\n", __func__, bdev_task, status);
+	spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), status);
+}
+
+/* Completion callback from libtcmur, possibly on a non-SPDK thread */
 static void
 cmd_done(struct tcmu_device * tcmu_dev, struct tcmur_cmd * cmd, int sts)
 {
-	struct bdev_impl_task * bdev_task = container_of(cmd, struct bdev_impl_task, cmd);
-	int status = sts == TCMU_STS_OK ? SPDK_BDEV_IO_STATUS_SUCCESS
-					: SPDK_BDEV_IO_STATUS_FAILED;
+	struct bdev_impl_task * bdev_task =
+		container_of(cmd, struct bdev_impl_task, tcmur_task.tcmur_cmd);
+	struct spdk_io_channel *ch = spdk_io_channel_from_ctx(bdev_task->ch);
+	struct spdk_thread * thr = spdk_io_channel_get_thread(ch);
+	bdev_task->sts = sts;
 
-	spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), status);
-	bdev_task->ch->io_inflight--;
+#ifdef TOO_NOISY
+	if (thr == spdk_get_thread())	/* on the requesting SPDK thread */
+#elif USE_UMC
+	if (current == NULL)		/* on some SPDK thread */
+#else
+	if (0)
+#endif
+		do_callback(cmd);
+	else {
+		/* Defer completion callback to the SPDK thread the request came in on */
+		SPDK_DEBUGLOG(SPDK_LOG_IMPL, "%s: %p handoff TCMUR status %d\n", __func__, bdev_task, sts);
+		spdk_thread_send_msg(thr, do_callback, cmd);
+	}
 
 	if (bdev_task->iov)
 		free(bdev_task->iov);
 }
 
-//XXXX Before calling tcmur_read() and tcmur_write(), we should check whether the tcmu-runner
-//     handler might block.  If the handler's nr_threads is zero then it is not expected to
-//     block in calls to read/write (completing them asynchronously), and the logic below is
-//     appropriate.  However, if nr_threads is non-zero then the handler completes the request
-//     before returning, which may entail blocking.  In that case we should here be passing the
-//     request to one or more separate, non-SPDK thread(s), so as to not block SPDK reactors.
-
-static int64_t
+static void
 bdev_impl_readv(struct file_disk *fdisk, struct spdk_io_channel *ch,
 	       struct bdev_impl_task *bdev_task,
 	       struct iovec *iov_in, int iovcnt, uint64_t nbytes, uint64_t offset)
@@ -188,31 +220,31 @@ bdev_impl_readv(struct file_disk *fdisk, struct spdk_io_channel *ch,
 	//    passed iovec, which is done by, e.g., tcmu_memcpy_into_iovec()
 	struct iovec * iov = calloc(iovcnt, sizeof(*iov));
 	memcpy(iov, iov_in, iovcnt * sizeof(*iov));
+
+	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "read(%d) %p %d iovs size %lu to off: %#lx\n",
+		      fdisk->fd, bdev_task, iovcnt, nbytes, offset);
+
 	bdev_task->iov = iov;
-
 	bdev_task->ch = impl_ch;
-	bdev_task->cmd.done = cmd_done;
+	bdev_task->tcmur_task.tcmur_cmd.done = cmd_done;
 
-	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "read %d iovs size %lu to off: %#lx\n",
-		      iovcnt, nbytes, offset);
+	impl_ch->io_inflight++;
 
-	rc = tcmur_read(fdisk->fd, &bdev_task->cmd, iov, iovcnt, nbytes, offset);
+	rc = tcmur_read(fdisk->fd, &bdev_task->tcmur_task, iov, iovcnt, nbytes, offset);
 	if (rc < 0) {
 		if (rc == -ENOMEM) {
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_NOMEM);
-			SPDK_DEBUGLOG(SPDK_LOG_IMPL, "%s: tcmur_read returned ENOMEM\n", __func__);
+			SPDK_DEBUGLOG(SPDK_LOG_IMPL, "%s: tcmur_read %p returned ENOMEM\n", __func__, bdev_task);
 		} else {
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_FAILED);
-			SPDK_ERRLOG("%s: tcmur_read returned %d\n", __func__, rc);
+			SPDK_ERRLOG("%s: tcmur_read %p returned ERROR %d\n", __func__, bdev_task, rc);
 		}
+		impl_ch->io_inflight--;
 		free(iov);
-		return -1;
 	}
-	impl_ch->io_inflight++;
-	return nbytes;
 }
 
-static int64_t
+static void
 bdev_impl_writev(struct file_disk *fdisk, struct spdk_io_channel *ch,
 		struct bdev_impl_task *bdev_task,
 		struct iovec *iov_in, int iovcnt, size_t nbytes, uint64_t offset)
@@ -222,53 +254,55 @@ bdev_impl_writev(struct file_disk *fdisk, struct spdk_io_channel *ch,
 
 	struct iovec * iov = calloc(iovcnt, sizeof(*iov));
 	memcpy(iov, iov_in, iovcnt * sizeof(*iov));
+
+	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "write(%d) %p %d iovs size %lu from off: %#lx\n",
+		      fdisk->fd, bdev_task, iovcnt, nbytes, offset);
+
 	bdev_task->iov = iov;
-
 	bdev_task->ch = impl_ch;
-	bdev_task->cmd.done = cmd_done;
+	bdev_task->tcmur_task.tcmur_cmd.done = cmd_done;
 
-	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "write %d iovs size %lu from off: %#lx\n",
-		      iovcnt, nbytes, offset);
+	impl_ch->io_inflight++;
 
-	rc = tcmur_write(fdisk->fd, &bdev_task->cmd, iov, iovcnt, nbytes, offset);
+	rc = tcmur_write(fdisk->fd, &bdev_task->tcmur_task, iov, iovcnt, nbytes, offset);
 	if (rc < 0) {
+		impl_ch->io_inflight--;
 		if (rc == -ENOMEM) {
+			SPDK_DEBUGLOG(SPDK_LOG_IMPL, "%s: tcmur_write %p returned ENOMEM\n", __func__, bdev_task);
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_NOMEM);
 		} else {
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_FAILED);
-			SPDK_ERRLOG("%s: io_submit returned %d\n", __func__, rc);
+			SPDK_ERRLOG("%s: tcmur_write %p returned ERROR %d\n", __func__, bdev_task, rc);
 		}
 		free(iov);
-		return -1;
 	}
-	impl_ch->io_inflight++;
-	return nbytes;
 }
 
-static int
+static void
 bdev_impl_flush(struct file_disk *fdisk, struct spdk_io_channel *ch, struct bdev_impl_task *bdev_task)
 {
 	struct bdev_impl_io_channel *impl_ch = spdk_io_channel_get_ctx(ch);
 	int rc;
 
+	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "flush(%d) %p\n", fdisk->fd, bdev_task);
+
 	bdev_task->iov = NULL;
 	bdev_task->ch = impl_ch;
-	bdev_task->cmd.done = cmd_done;
+	bdev_task->tcmur_task.tcmur_cmd.done = cmd_done;
 
-	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "flush\n");
+	impl_ch->io_inflight++;
 
-	rc = tcmur_flush(fdisk->fd, &bdev_task->cmd);
+	rc = tcmur_flush(fdisk->fd, &bdev_task->tcmur_task);
 	if (rc < 0) {
+		impl_ch->io_inflight--;
 		if (rc == -ENOMEM) {
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_NOMEM);
+			SPDK_DEBUGLOG(SPDK_LOG_IMPL, "%s: tcmur_flush %p returned ENOMEM\n", __func__, bdev_task);
 		} else {
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_FAILED);
-			SPDK_ERRLOG("%s: io_submit returned %d\n", __func__, rc);
+			SPDK_ERRLOG("%s: tcmur_flush %p returned ERROR %d\n", __func__, bdev_task, rc);
 		}
-		return -1;
 	}
-	impl_ch->io_inflight++;
-	return 0;
 }
 
 static uint64_t
@@ -687,22 +721,40 @@ bdev_impl_delete(struct spdk_bdev *bdev, delete_tcmur_bdev_complete cb_fn, void 
 	spdk_bdev_unregister(bdev, impl_bdev_unregister_cb, ctx);
 }
 
-static int
-bdev_impl_initialize(void)
+static void *
+do_UMC_init(void * arg)
 {
-	size_t i;
-	struct spdk_conf_section *sp;
+#ifdef SPDK_CONFIG_DRBD
+	int rc;
 
 	/* Initialize the multithreaded engine used by UMC */
 	sys_service_set(MTE_sys_service_get());
 	sys_service_init(NULL);
 
 	/* Initialize usermode-compatibility for kernel modules */
-	int rc = UMC_init("/UMCfuse");	/* mount point for fuse tree */
+	rc = UMC_init("/UMCfuse");	/* mount point for fuse tree */
 	if (rc) {
 		SPDK_ERRLOG("UMC_init() returned %d\n", rc);
-		return rc;
+		return ERR_PTR(rc);
 	}
+
+	if (!getenv("DISABLE_DRBD")) {
+		DRBD_init();
+	}
+#endif
+
+	return 0;
+}
+
+static int
+bdev_impl_initialize(void)
+{
+	size_t i;
+	struct spdk_conf_section *sp;
+
+	void * ret = spdk_call_unaffinitized(do_UMC_init, NULL);
+	if ((uintptr_t)ret)
+		return (uintptr_t)ret;
 
 	TAILQ_INIT(&g_impl_disk_head);
 
@@ -717,6 +769,7 @@ bdev_impl_initialize(void)
 		const char *cfg_str;
 		const char *minor_str;
 		int32_t minor;
+		int rc;
 
 		minor_str = spdk_conf_section_get_nmval(sp, IMPL_NAME_STR, i, 0);
 		if (!minor_str) {
@@ -760,6 +813,7 @@ static void
 bdev_impl_fini(void)
 {
 	spdk_io_device_unregister(&impl_if, NULL);
+	//XXX UMC_exit();
 }
 
 static void

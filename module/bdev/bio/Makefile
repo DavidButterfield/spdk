@@ -1,7 +1,7 @@
 SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
-CFLAGS += -DCONFIG_BIO
+CFLAGS += -DUSE_UMC
 
 #XXX What is the right way to import a non-system archive from another repository?
 TCMUR_ROOT_DIR := $(SPDK_ROOT_DIR)/../tcmu-runner

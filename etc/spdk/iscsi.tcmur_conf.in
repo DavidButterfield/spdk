@@ -1,3 +1,4 @@
+# etc/spdk/iscsi.tcmur_conf.in
 # iSCSI target configuration file using tcmu-runner storage handlers
 
 [Global]
@@ -10,15 +11,20 @@
   #BdevIoCacheSize 256
 
 #XXX NOTE: Only handler_ram.so and handler_file.so have been tested so far.
-#XXX       An async handler (nr_threads == 0) needs to be tried!!
+#XXX       Need to try an async handler (nr_threads == 0)!
 
-# Format:
-# TCMUR <tcmur-minor-number> <spdk-bdev-name> <tcmur-dev-name> <tcmur-cfg-str>
-# The tcmu-runner handler name is derived from the first segment of tcmur-cfg-str
-# Minor number and names are arbitrary but must be kept unique across instances
+# Format for tcmu-runner handler devices:
+#	TCMUR <tcmur-minor-number> <dev-name> <tcmur-cfg-str>
+# tcmur-minor-number should be less than 256 and unique across TCMUR instances.
+# dev-name is arbitrary but should be unique across instances.
+# tcmu-runner handler name is derived from the first segment of tcmur-cfg-str.
 [TCMUR]
-  TCMUR 0 tcmur00 ram00 /ram/tmp/tcmur_ram00
-  TCMUR 1 tcmur01 file01 /file//tmp/tcmur_file01
+# TCMUR 0 ram_a  /ram/tmp/tcmur_ram00
+# TCMUR 1 file_a /file//tmp/tcmur_file00
+
+# Use handler_ram only
+  TCMUR 0 ram_a  /ram/tmp/tcmur_ram00
+  TCMUR 1 file_a /ram/tmp/tcmur_file00
 
 [Malloc]
   NumberOfLuns 1
@@ -26,7 +32,7 @@
   BlockSize 4096
 
 [AIO]
-  AIO /tmp/myfile AIO2 4096
+  AIO /tmp/myfile AIO0 4096
 
 [iSCSI]
   NodeBase "iqn.2016-06.io.spdk"
@@ -42,7 +48,7 @@
   ErrorRecoveryLevel 0
 
 [PortalGroup1]
-  Portal DA1 192.168.1.37:3260
+  Portal DA1 192.168.1.23:3260
 
 [InitiatorGroup1]
   InitiatorName ANY
@@ -57,6 +63,6 @@
   UseDigest Auto
   QueueDepth 64
   LUN0 Malloc0
-  LUN1 AIO2
-  LUN2 tcmur00
-  LUN3 tcmur01
+  LUN1 AIO0
+  LUN2 ram_a
+  LUN3 file_a

@@ -46,8 +46,8 @@ DIRS-$(CONFIG_URING) += uring
 
 ifeq ($(OS),Linux)
 DIRS-y += aio
-DIRS-y += tcmur
-DIRS-y += bio
+DIRS-$(CONFIG_TCMUR) += tcmur
+DIRS-$(CONFIG_DRBD) += bio
 DIRS-$(CONFIG_ISCSI_INITIATOR) += iscsi
 DIRS-$(CONFIG_VIRTIO) += virtio
 DIRS-$(CONFIG_PMDK) += pmem

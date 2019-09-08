@@ -43,7 +43,7 @@
 struct rpc_construct_impl {
 	char *name;
 	char *filename;
-//	uint32_t block_size;
+	char *helper_cmd;
 };
 
 static void
@@ -51,12 +51,13 @@ free_rpc_construct_impl(struct rpc_construct_impl *req)
 {
 	free(req->name);
 	free(req->filename);
+	free(req->helper_cmd);
 }
 
 static const struct spdk_json_object_decoder rpc_construct_impl_decoders[] = {
 	{"name", offsetof(struct rpc_construct_impl, name), spdk_json_decode_string},
 	{"filename", offsetof(struct rpc_construct_impl, filename), spdk_json_decode_string},
-//	{"block_size", offsetof(struct rpc_construct_aio, block_size), spdk_json_decode_uint32, true},
+	{"helper_cmd", offsetof(struct rpc_construct_impl, helper_cmd), spdk_json_decode_string},
 };
 
 static void
@@ -76,8 +77,7 @@ spdk_rpc_bdev_impl_create(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	// rc = create_bio_bdev(req.name, req.filename, req.block_size);
-	rc = create_bio_bdev(req.name, req.filename);
+	rc = create_bio_bdev(req.name, req.filename, req.helper_cmd);
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
 		goto cleanup;

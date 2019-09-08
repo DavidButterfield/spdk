@@ -40,6 +40,8 @@ include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 export TCMUR_ROOT_DIR := $(SPDK_ROOT_DIR)/../tcmu-runner
 export UMC_ROOT_DIR := $(SPDK_ROOT_DIR)/../usermode_compat/src
 export MTE_ROOT_DIR := $(SPDK_ROOT_DIR)/../MTE/src
+export DRBD_ROOT_DIR := $(SPDK_ROOT_DIR)/../drbd-9.0
+export SCST_ROOT_DIR := $(SPDK_ROOT_DIR)/../SCST-Usermode-Adaptation/usermode
 
 DIRS-y += lib
 DIRS-y += module

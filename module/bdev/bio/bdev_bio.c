@@ -45,10 +45,7 @@
 #define SPDK_LOG_IMPL			SPDK_LOG_BIO
 #include "bdev_bio.h"
 typedef delete_bio_bdev_complete 	delete_impl_bdev_complete;
-#if 0
-extern error_t UMC_init(const char * procname);
-#include "mtelib.h"
-#endif
+#include <stdlib.h>	/* system(3) */
 
 #include "spdk/stdinc.h"
 #include "spdk/barrier.h"
@@ -81,6 +78,7 @@ struct file_disk {
 	struct spdk_poller	*reset_retry_timer;
 	struct spdk_bdev	disk;
 	char			*filename;	/* bio device name */
+	const char		*helper_cmd;
 	struct block_device	*bdev;
 	TAILQ_ENTRY(file_disk)  link;
 	bool			block_size_override;
@@ -146,17 +144,31 @@ bdev_impl_close(struct file_disk *fdisk)
 	return 0;
 }
 
-/* Completion callback */
+/* Issue callback to our requestor */
+static inline void
+do_callback(void * arg)
+{
+	struct bio * bio = arg;
+	struct bdev_impl_task * bdev_task = bio->bi_private;
+	int status = bio->bi_error ? SPDK_BDEV_IO_STATUS_FAILED : SPDK_BDEV_IO_STATUS_SUCCESS;
+	bio_put(bio);
+	spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), status);
+}
+
+/* Callback from bio implementor */
 static void
 cmd_done(struct bio * bio, error_t err)
 {
-	struct bdev_impl_task * bdev_task = bio->bi_private;
-	int status = err ? SPDK_BDEV_IO_STATUS_FAILED : SPDK_BDEV_IO_STATUS_SUCCESS;
+	struct bdev_impl_task * bdev_task;
+	bio->bi_error = err;
 
-	spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), status);
+	bdev_task = bio->bi_private;
 	bdev_task->ch->io_inflight--;
 
-	bio_put(bio);
+	/* Defer completion callback to the SPDK thread the request came in on */
+	spdk_thread_send_msg(
+		spdk_io_channel_get_thread(spdk_io_channel_from_ctx(bdev_task->ch)),
+		do_callback, bio);
 }
 
 static struct bio *
@@ -168,11 +180,17 @@ bdev_bio_alloc_set(struct block_device * bdev, struct iovec * iov, int iovcnt,
 	unsigned int npage = 2 * iovcnt + (unsigned int)(nbytes / PAGE_SIZE);
 	struct page * pages = calloc(npage, sizeof(*pages));
 	struct page * page = pages;
+	uint64_t dev_size = bdev->bd_inode->i_size;
 
 	assert_imply(nbytes, iov);
 	assert_imply(nbytes, iovcnt);
 	assert_eq(offset % 512, 0, "unaligned offset on minor %d", bdev->bd_disk->first_minor);
 	assert_eq(nbytes % 512, 0, "unaligned nbytes on minor %d", bdev->bd_disk->first_minor);
+
+	if ((uint64_t)offset >= dev_size)
+		return NULL;
+	if ((uint64_t)offset + nbytes > dev_size)
+		nbytes = dev_size - offset;	//XXX right?
 
 	bio = bio_alloc(0, npage);
 	bio_set_dev(bio, bdev);
@@ -200,7 +218,7 @@ bdev_bio_alloc_set(struct block_device * bdev, struct iovec * iov, int iovcnt,
 		}
 	}
 
-	assert_eq(bio->bi_size, nbytes);
+	assert_ge(bio->bi_size, nbytes);
 	return bio;
 }
 
@@ -213,11 +231,14 @@ bdev_impl_readv(struct file_disk *fdisk, struct spdk_io_channel *ch,
 	int rc;
 
 	struct bio * bio = bdev_bio_alloc_set(fdisk->bdev, iov, iovcnt, nbytes, offset);
+	if (!bio)
+		return -1;
+
 	bio->bi_private = bdev_task;
 
 	bdev_task->ch = impl_ch;
 
-	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "read %d iovs size %lu to off: %#lx\n",
+	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "read %d iovs size %lu at off: %#lx\n",
 		      iovcnt, nbytes, offset);
 
 	rc = submit_bio(READ, bio);
@@ -229,6 +250,7 @@ bdev_impl_readv(struct file_disk *fdisk, struct spdk_io_channel *ch,
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_FAILED);
 			SPDK_ERRLOG("%s: submit_bio(READ) returned %d\n", __func__, rc);
 		}
+		//XXXXX free the page array
 		return -1;
 	}
 	impl_ch->io_inflight++;
@@ -248,17 +270,19 @@ bdev_impl_writev(struct file_disk *fdisk, struct spdk_io_channel *ch,
 
 	bdev_task->ch = impl_ch;
 
-	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "write %d iovs size %lu from off: %#lx\n",
+	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "write %d iovs size %lu at off: %#lx\n",
 		      iovcnt, nbytes, offset);
 
 	rc = submit_bio(WRITE, bio);
 	if (rc < 0) {
 		if (rc == -ENOMEM) {
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_NOMEM);
+			SPDK_DEBUGLOG(SPDK_LOG_IMPL, "%s: submit_bio(WRITE) returned ENOMEM\n", __func__);
 		} else {
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_FAILED);
-			SPDK_ERRLOG("%s: io_submit returned %d\n", __func__, rc);
+			SPDK_ERRLOG("%s: submit_bio(WRITE) returned %d\n", __func__, rc);
 		}
+		//XXXXX free the page array
 		return -1;
 	}
 	impl_ch->io_inflight++;
@@ -284,7 +308,7 @@ bdev_impl_flush(struct file_disk *fdisk, struct spdk_io_channel *ch, struct bdev
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_NOMEM);
 		} else {
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_FAILED);
-			SPDK_ERRLOG("%s: io_submit returned %d\n", __func__, rc);
+			SPDK_ERRLOG("%s: submit_bio(FLUSH) returned %d\n", __func__, rc);
 		}
 		return -1;
 	}
@@ -517,6 +541,8 @@ bdev_impl_write_json_config(struct spdk_bdev *bdev, struct spdk_json_write_ctx *
 	spdk_json_write_named_object_begin(w, "params");
 	spdk_json_write_named_string(w, "name", bdev->name);
 	spdk_json_write_named_string(w, "filename", fdisk->filename);
+	if (fdisk->helper_cmd)
+		spdk_json_write_named_string(w, "helper_cmd", fdisk->helper_cmd);
 	spdk_json_write_object_end(w);
 
 	spdk_json_write_object_end(w);
@@ -532,7 +558,7 @@ static const struct spdk_bdev_fn_table impl_fn_table = {
 };
 
 int
-create_impl_bdev(const char * spdk_name, const char * impl_name)
+create_impl_bdev(const char * spdk_name, const char * impl_name, const char * helper_cmd)
 {
 	struct file_disk *fdisk;
 	uint32_t detected_block_size;
@@ -546,6 +572,7 @@ create_impl_bdev(const char * spdk_name, const char * impl_name)
 		return -ENOMEM;
 	}
 
+	fdisk->helper_cmd = helper_cmd;
 	fdisk->filename = strdup(impl_name);
 	if (!fdisk->filename) {
 		rc = -ENOMEM;
@@ -682,25 +709,6 @@ bdev_impl_initialize(void)
 	size_t i;
 	struct spdk_conf_section *sp;
 
-#if 0
-	sys_service_set(MTE_sys_service_get());
-	sys_service_init(NULL);
-
-	int rc = UMC_init("/UMCfuse");	/* mount point for fuse tree */
-	if (rc) {
-		SPDK_ERRLOG("libtcmur_init() returned %d\n", rc);
-		return rc;
-	}
-#endif
-
-#if 0
-	int rc = DRBD_init();
-	if (rc) {
-		SPDK_ERRLOG("libtcmur_init() returned %d\n", rc);
-		return rc;
-	}
-#endif
-
 	TAILQ_INIT(&g_impl_disk_head);
 
 	sp = spdk_conf_find_section(NULL, IMPL_NAME_STR);
@@ -713,6 +721,8 @@ bdev_impl_initialize(void)
 		int rc;
 		const char *file;
 		const char *name;
+		const char *helper;
+		char *cmd = NULL;
 
 		name = spdk_conf_section_get_nmval(sp, IMPL_NAME_STR, i, 0);
 		if (!name) {
@@ -726,7 +736,21 @@ bdev_impl_initialize(void)
 			continue;
 		}
 
-		rc = create_impl_bdev(name, file);
+		/* Helper can issue commands to bio module via its native admin interface */
+		//XXX probably a better way to just get the rest of the line?
+		helper = spdk_conf_section_get_nmval(sp, IMPL_NAME_STR, i, 2);
+		if (helper) {
+			const char * arg1 = spdk_conf_section_get_nmval(sp, IMPL_NAME_STR, i, 3);
+			const char * arg2 = spdk_conf_section_get_nmval(sp, IMPL_NAME_STR, i, 4);
+			if (asprintf(&cmd, "%s %s %s", helper, arg1?:"", arg2?:"") > 0) {
+				SPDK_NOTICELOG("Invoking helper: %s\n", cmd);
+				rc = system(cmd);
+				if (rc)
+					SPDK_ERRLOG("%s returned 0x%x\n", cmd, rc);
+			}
+		}
+
+		rc = create_impl_bdev(name, file, cmd);
 		if (rc) {
 			SPDK_ERRLOG("Unable to create "IMPL_NAME_STR" %s, err is %s\n", name, spdk_strerror(-rc));
 			i++;
@@ -743,7 +767,6 @@ static void
 bdev_impl_fini(void)
 {
 	spdk_io_device_unregister(&impl_if, NULL);
-	//XXX UMC_exit();
 }
 
 static void
@@ -751,18 +774,26 @@ bdev_impl_get_spdk_running_config(FILE *fp)
 {
 	char			*file;
 	char			*name;
+	const char		*helper_cmd;
 	struct file_disk	*fdisk;
 
 	fprintf(fp,
 		"\n"
+		"# Translate from SPDK BDEV protocol to kernel BIO protocol\n"
+		"# (SPDK front-end shim for kernel BIO modules ported to usermode)\n"
+		"# The helper allows external configuration of the BIO module\n"
 		"# Format:\n"
-		"# BIO <spdk-bdev-name> <bio-dev-name> [<block_size>]\n"
+		"# BIO <spdk-bdev-name> <bio-dev-name> [ helper [ arg1 [ arg2 ] ] ]\n"
 		"["IMPL_NAME_STR"]\n");
 
 	TAILQ_FOREACH(fdisk, &g_impl_disk_head, link) {
 		file = fdisk->filename;
 		name = fdisk->disk.name;
-		fprintf(fp, "  "IMPL_NAME_STR" %s %s\n", name, file);
+		helper_cmd = fdisk->helper_cmd;
+		fprintf(fp, "  "IMPL_NAME_STR" %s %s", name, file);
+		if (helper_cmd)
+			fprintf(fp, " %s", helper_cmd);
+		fprintf(fp, "\n");
 	}
 
 	fprintf(fp, "\n");

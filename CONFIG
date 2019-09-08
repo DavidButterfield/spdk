@@ -153,3 +153,9 @@ CONFIG_URING=n
 
 # Path to custom built IO_URING library
 CONFIG_URING_PATH=
+
+# Build with support for loadable tcmu-runner storage handlers
+CONFIG_TCMUR=n
+
+# Build with support for Distributed Replicated Block Device (DRBD)
+CONFIG_DRBD=n

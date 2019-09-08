@@ -40,7 +40,7 @@
 typedef void (*delete_bio_bdev_complete)(void *cb_arg, int bdeverrno);
 
 // int create_bio_bdev(const char *name, const char *filename, uint32_t block_size);
-int create_bio_bdev(const char *name, const char *filename);
+int create_bio_bdev(const char *name, const char *filename, const char *helper_cmd);
 
 void bdev_bio_delete(struct spdk_bdev *bdev, delete_bio_bdev_complete cb_fn, void *cb_arg);
 

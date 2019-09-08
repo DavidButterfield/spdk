@@ -90,6 +90,8 @@ function usage()
 	echo "                           If an argument is provided, it is considered a directory containing"
 	echo "                           liburing.a and io_uring.h. Otherwise the regular system paths will"
 	echo "                           be searched."
+	echo " tcmur                     Build in support for loadable tcmu-runner storage handlers"
+	echo " drbd                      Build in support for Distributed Replicated Block Device"
 	echo ""
 	echo "Environment variables:"
 	echo ""
@@ -352,6 +354,18 @@ for i in "$@"; do
 		--without-uring)
 			CONFIG[URING]=n
 			CONFIG[URING_PATH]=
+			;;
+		--with-tcmur)
+			CONFIG[TCMUR]=y
+			;;
+		--without-tcmur)
+			CONFIG[TCMUR]=n
+			;;
+		--with-drbd)
+			CONFIG[DRBD]=y
+			;;
+		--without-drbd)
+			CONFIG[DRBD]=n
 			;;
 		--)
 			break

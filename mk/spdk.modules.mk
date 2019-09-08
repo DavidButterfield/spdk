@@ -54,29 +54,42 @@ SYS_LIBS += -libverbs -lrdmacm
 endif
 
 ifeq ($(OS),Linux)
+
 BLOCKDEV_MODULES_LIST += ftl
 BLOCKDEV_MODULES_LIST += bdev_aio
 SYS_LIBS += -laio
 
-# Get the whole library because it is used by dynamically-loadable tcmu-runner handlers
-BLOCKDEV_MODULES_LIST += bdev_tcmur
-BLOCKDEV_MODULES_LIST += bdev_bio
-# LIBTCMUR = $(TCMUR_ROOT_DIR)/libtcmur/libtcmur.a
-# SYS_LIBS += -Wl,--whole-archive $(LIBTCMUR) -Wl,--no-whole-archive -export-dynamic
-LIBUMC = $(UMC_ROOT_DIR)/usermode_lib.a
-SYS_LIBS += -Wl,--whole-archive $(LIBUMC) -Wl,--no-whole-archive -export-dynamic
-SYS_LIBS += $(MTE_ROOT_DIR)/libmte.a
-SYS_LIBS += -lfuse	#XXX
+ifeq ($(CONFIG_TCMUR),y)
+  BLOCKDEV_MODULES_LIST += bdev_tcmur
+  # TCMUR library is included in usermode-compat library, so only add here if not there
+  ifneq ($(CONFIG_DRBD),y)
+    # Get entire TCMUR library because it is used by dynamically-loadable tcmu-runner handlers
+    LIBTCMUR = $(TCMUR_ROOT_DIR)/libtcmur/libtcmur.a
+    SYS_LIBS += -Wl,--whole-archive $(LIBTCMUR) -Wl,--no-whole-archive -export-dynamic
+  endif
+endif
+
+ifeq ($(CONFIG_DRBD),y)
+  BLOCKDEV_MODULES_LIST += bdev_bio
+  SYS_LIBS += $(SCST_ROOT_DIR)/drbd_compat.o $(DRBD_ROOT_DIR)/drbd/drbd.o
+  # Get entire usermode-compat library because it is used by loadable tcmu-runner handlers
+  LIBUMC = $(UMC_ROOT_DIR)/usermode_lib.a
+  SYS_LIBS += -Wl,--whole-archive $(LIBUMC) -Wl,--no-whole-archive -export-dynamic
+  SYS_LIBS += $(MTE_ROOT_DIR)/libmte.a
+  SYS_LIBS += -lfuse
+endif
 
 ifeq ($(CONFIG_VIRTIO),y)
 BLOCKDEV_MODULES_LIST += bdev_virtio virtio
 endif
+
 ifeq ($(CONFIG_ISCSI_INITIATOR),y)
 BLOCKDEV_MODULES_LIST += bdev_iscsi
 # Fedora installs libiscsi to /usr/lib64/iscsi for some reason.
 SYS_LIBS += -L/usr/lib64/iscsi -liscsi
 endif
-endif
+
+endif	# ($(OS),Linux)
 
 ifeq ($(CONFIG_URING),y)
 BLOCKDEV_MODULES_LIST += bdev_uring
