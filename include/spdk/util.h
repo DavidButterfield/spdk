@@ -63,6 +63,19 @@ extern "C" {
 #if defined(__GNUC__) && __GNUC__ >= 6 && !defined(__clang__) \
 	&& (defined(__i386__) || defined(__x86_64__))
 //XXX Broken! __attribute__((target_clones("bmi", "arch=core2", "arch=atom", "default")))
+//XXX SIGSEGV in spdk_u32log2...resolver callecd from _dl_relocate_object on this CPU:
+// product: Intel(R) Core(TM) i5-2520M CPU @ 2.50GHz
+// version: Intel(R) Core(TM) i5-2520M CPU @ 2.50GHz
+// width: 64 bits
+// capabilities: x86-64 fpu fpu_exception wp vme de pse tsc msr pae mce cx8 apic
+//    sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht
+//    tm pbe syscall nx rdtscp constant_tsc arch_perfmon pebs bts rep_good nopl
+//    xtopology nonstop_tsc cpuid aperfmperf pni pclmulqdq dtes64 monitor ds_cpl
+//    vmx smx est tm2 ssse3 cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic popcnt
+//    tsc_deadline_timer aes xsave avx lahf_lm epb pti ssbd ibrs ibpb stibp
+//    tpr_shadow vnmi flexpriority ept vpid xsaveopt dtherm ida arat pln pts
+//    md_clear flush_l1d cpufreq
+// configuration: cores=2 enabledcores=2 threads=4
 #endif
 static inline uint32_t
 spdk_u32log2(uint32_t x)

@@ -1,21 +1,21 @@
-# /etc/drbd.d/nonspdk.res
+# /etc/drbd.d/drbd2.res
 
-resource nonspdk {
+resource drbd2 {
     on blackbox {
 	node-id			0;
-	address			192.168.1.22:7789;
+	address			192.168.1.22:7788;
 	volume 0 {
-	    device		drbd1 minor 1;
-	    disk		"/UMCfuse/dev/ram000";
+	    device		drbd2 minor 2;
+	    disk		"/UMCfuse/dev/ram001";
 	    meta-disk		internal;
 	}
     }
 
     on bottom {
 	node-id			2;
-	address			192.168.1.23:7789;
+	address			192.168.1.23:7788;
 	volume 0 {
-	    device		drbd1 minor 1;
+	    device		drbd2 minor 2;
             disk		"/UMCfuse/dev/file_c";
 	    meta-disk		internal;
 	 }

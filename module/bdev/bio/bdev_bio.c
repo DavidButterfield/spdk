@@ -37,15 +37,7 @@
 #undef ntohs
 #undef htonl
 #undef htons
-#define _impl_name			bio
-#define impl_name_str			"bio"
-#define IMPL_NAME_STR			"BIO"
-#define create_impl_bdev		create_bio_bdev
-#define bdev_impl_delete		bdev_bio_delete
-#define SPDK_LOG_IMPL			SPDK_LOG_BIO
 #include "bdev_bio.h"
-typedef delete_bio_bdev_complete 	delete_impl_bdev_complete;
-#include <stdlib.h>	/* system(3) */
 
 #include "spdk/stdinc.h"
 #include "spdk/barrier.h"
@@ -62,70 +54,69 @@ typedef delete_bio_bdev_complete 	delete_impl_bdev_complete;
 
 #include "spdk_internal/log.h"
 
-struct bdev_impl_io_channel {
+struct bdev_bio_io_channel {
 	uint64_t			io_inflight;
 };
 
-struct bdev_impl_task {
-	struct bio			*bio;
-	struct bdev_impl_io_channel	*ch;
-	TAILQ_ENTRY(bdev_impl_task)	link;
+struct bdev_bio_task {
+	struct bdev_bio_io_channel	*ch;
+	struct page			*pages;
+	TAILQ_ENTRY(bdev_bio_task)	link;
 };
 
 /* bio device */
 struct file_disk {
-	struct bdev_impl_task	*reset_task;
+	struct bdev_bio_task	*reset_task;
 	struct spdk_poller	*reset_retry_timer;
 	struct spdk_bdev	disk;
 	char			*filename;	/* bio device name */
-	const char		*helper_cmd;
 	struct block_device	*bdev;
 	TAILQ_ENTRY(file_disk)  link;
 	bool			block_size_override;
 };
 
-static int bdev_impl_initialize(void);
-static void bdev_impl_fini(void);
-static void bdev_impl_get_spdk_running_config(FILE *fp);
-static TAILQ_HEAD(, file_disk) g_impl_disk_head;
+static int bdev_bio_initialize(void);
+static void bdev_bio_fini(void);
+static void bdev_bio_get_spdk_running_config(FILE *fp);
+static TAILQ_HEAD(, file_disk) g_bio_disk_head;
 
 static int
-bdev_impl_get_ctx_size(void)
+bdev_bio_get_ctx_size(void)
 {
-	return sizeof(struct bdev_impl_task);
+	return sizeof(struct bdev_bio_task);
 }
 
-static struct spdk_bdev_module impl_if = {
-	.name		= impl_name_str,
-	.module_init	= bdev_impl_initialize,
-	.module_fini	= bdev_impl_fini,
-	.config_text	= bdev_impl_get_spdk_running_config,
-	.get_ctx_size	= bdev_impl_get_ctx_size,
+static struct spdk_bdev_module bio_if = {
+	.name		= "bio",
+	.module_init	= bdev_bio_initialize,
+	.module_fini	= bdev_bio_fini,
+	.config_text	= bdev_bio_get_spdk_running_config,
+	.get_ctx_size	= bdev_bio_get_ctx_size,
 };
 
-SPDK_BDEV_MODULE_REGISTER(_impl_name, &impl_if)
+SPDK_BDEV_MODULE_REGISTER(bio, &bio_if)
 
 #define BIO_OPEN_MODE (O_RDWR | O_DIRECT)
 
 static int
-bdev_impl_open(struct file_disk *fdisk)
+bdev_bio_open(struct file_disk *fdisk)
 {
-	struct block_device * bio_bdev;
+	struct block_device * bdev_bio;
 
-	bio_bdev = open_bdev_exclusive(fdisk->filename, BIO_OPEN_MODE, NULL);
-	if (IS_ERR_OR_NULL(bio_bdev)) {
+	bdev_bio = open_bdev_exclusive(fdisk->filename, BIO_OPEN_MODE, NULL);
+	if (IS_ERR_OR_NULL(bdev_bio)) {
 		SPDK_ERRLOG("open() failed (file:%s), ret=%ld: %s\n", fdisk->filename,
-				PTR_ERR(bio_bdev), spdk_strerror(-PTR_ERR(bio_bdev)));
-		return PTR_ERR(bio_bdev);
+				PTR_ERR(bdev_bio), spdk_strerror(-PTR_ERR(bdev_bio)));
+		return PTR_ERR(bdev_bio);
 	}
 
-	fdisk->bdev = bio_bdev;
+	fdisk->bdev = bdev_bio;
 
 	return 0;
 }
 
 static int
-bdev_impl_close(struct file_disk *fdisk)
+bdev_bio_close(struct file_disk *fdisk)
 {
 	error_t rc;
 
@@ -144,14 +135,28 @@ bdev_impl_close(struct file_disk *fdisk)
 	return 0;
 }
 
-/* Issue callback to our requestor */
+/* Issue completion callback on our requesting SPDK thread */
 static inline void
 do_callback(void * arg)
 {
 	struct bio * bio = arg;
-	struct bdev_impl_task * bdev_task = bio->bi_private;
-	int status = bio->bi_error ? SPDK_BDEV_IO_STATUS_FAILED : SPDK_BDEV_IO_STATUS_SUCCESS;
+	struct bdev_bio_task * bdev_task = bio->bi_private;
+	int status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	if (bio->bi_error == -ENOMEM) {
+		status = SPDK_BDEV_IO_STATUS_NOMEM;
+		SPDK_DEBUGLOG(SPDK_LOG_BIO, "%s: got/returning ENOMEM\n", __func__);
+	} else if (bio->bi_error) {
+		status = SPDK_BDEV_IO_STATUS_FAILED;
+		SPDK_ERRLOG("%s: bdev_bio got/returning ERROR %d\n", __func__, bio->bi_error);
+	}
+
 	bio_put(bio);
+	if (bdev_task->pages) {
+		free(bdev_task->pages);
+		bdev_task->pages = NULL;
+	}
+
 	spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), status);
 }
 
@@ -159,10 +164,9 @@ do_callback(void * arg)
 static void
 cmd_done(struct bio * bio, error_t err)
 {
-	struct bdev_impl_task * bdev_task;
+	struct bdev_bio_task * bdev_task = bio->bi_private;
 	bio->bi_error = err;
 
-	bdev_task = bio->bi_private;
 	bdev_task->ch->io_inflight--;
 
 	/* Defer completion callback to the SPDK thread the request came in on */
@@ -173,14 +177,15 @@ cmd_done(struct bio * bio, error_t err)
 
 static struct bio *
 bdev_bio_alloc_set(struct block_device * bdev, struct iovec * iov, int iovcnt,
-					size_t nbytes, off_t offset)
+			size_t nbytes, off_t offset, struct bdev_bio_task * bdev_task)
 {
 	int iovn;
 	struct bio * bio;
-	unsigned int npage = 2 * iovcnt + (unsigned int)(nbytes / PAGE_SIZE);
-	struct page * pages = calloc(npage, sizeof(*pages));
-	struct page * page = pages;
+	struct page * page;
+	unsigned int npage;
 	uint64_t dev_size = bdev->bd_inode->i_size;
+
+	memset(bdev_task, 0, sizeof(*bdev_task));  //XXX provided space apparently not zeroed?
 
 	assert_imply(nbytes, iov);
 	assert_imply(nbytes, iovcnt);
@@ -188,17 +193,26 @@ bdev_bio_alloc_set(struct block_device * bdev, struct iovec * iov, int iovcnt,
 	assert_eq(nbytes % 512, 0, "unaligned nbytes on minor %d", bdev->bd_disk->first_minor);
 
 	if ((uint64_t)offset >= dev_size)
-		return NULL;
+		return ERR_PTR(-EINVAL);
 	if ((uint64_t)offset + nbytes > dev_size)
-		nbytes = dev_size - offset;	//XXX right?
+		nbytes = dev_size - offset;
+
+	/* npage is upper bound on entries needed */
+	npage = 2 * iovcnt + (unsigned int)(nbytes / PAGE_SIZE);
 
 	bio = bio_alloc(0, npage);
 	bio_set_dev(bio, bdev);
 	bio->bi_sector = offset >> 9;
 	bio->bi_end_io = cmd_done;
+	bio->bi_private = bdev_task;
 
-	/* Each iovec entry may comprise multiple pages, but bio wants pages separate (XXX really?) */
-	for (iovn = 0; iovn < iovcnt; iovn++) {
+	if (npage) {
+	    page = bdev_task->pages = calloc(npage, sizeof(*page));
+	    if (!page)
+		return ERR_PTR(-ENOMEM);
+
+	    /* Each iovec entry may comprise multiple pages, but bio wants pages separate (XXX really?) */
+	    for (iovn = 0; iovn < iovcnt; iovn++) {
 		size_t size = iov[iovn].iov_len;
 		char * p = iov[iovn].iov_base;
 		off_t page_off = offset_in_page(p);
@@ -207,7 +221,7 @@ bdev_bio_alloc_set(struct block_device * bdev, struct iovec * iov, int iovcnt,
 		/* Fill in the bio page list with the pages of the current iov entry */
 		while (size) {
 			size_t page_datalen = min((size_t)(PAGE_SIZE - page_off), size);
-			assert_lt(page, pages + npage);
+			assert_lt(page, bdev_task->pages + npage);
 			page->vaddr = (void *)((uintptr_t)p & PAGE_MASK);
 			page->order = 1;
 			bio_add_page(bio, page, (unsigned int)page_datalen, (unsigned int)page_off);
@@ -216,121 +230,121 @@ bdev_bio_alloc_set(struct block_device * bdev, struct iovec * iov, int iovcnt,
 			page++;
 			page_off = 0;	/* non-first pages of each iov entry start at offset zero */
 		}
+	    }
 	}
 
 	assert_ge(bio->bi_size, nbytes);
 	return bio;
 }
 
-static int64_t
-bdev_impl_readv(struct file_disk *fdisk, struct spdk_io_channel *ch,
-	       struct bdev_impl_task *bdev_task,
+static void
+bdev_bio_readv(struct file_disk *fdisk, struct spdk_io_channel *ch,
+	       struct bdev_bio_task *bdev_task,
 	       struct iovec *iov, int iovcnt, uint64_t nbytes, uint64_t offset)
 {
-	struct bdev_impl_io_channel *impl_ch = spdk_io_channel_get_ctx(ch);
-	int rc;
+	struct bdev_bio_io_channel *bio_ch = spdk_io_channel_get_ctx(ch);
+	error_t err;
 
-	struct bio * bio = bdev_bio_alloc_set(fdisk->bdev, iov, iovcnt, nbytes, offset);
-	if (!bio)
-		return -1;
+	struct bio * bio = bdev_bio_alloc_set(fdisk->bdev, iov, iovcnt, nbytes, offset, bdev_task);
+	if (IS_ERR(bio)) {
+		int status = PTR_ERR(bio) == -ENOMEM
+				? SPDK_BDEV_IO_STATUS_NOMEM
+			  	: SPDK_BDEV_IO_STATUS_FAILED;
+		spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), status);
+		return;
+	}
 
-	bio->bi_private = bdev_task;
+	bdev_task->ch = bio_ch;
 
-	bdev_task->ch = impl_ch;
-
-	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "read %d iovs size %lu at off: %#lx\n",
+	SPDK_DEBUGLOG(SPDK_LOG_BIO, "read %d iovs size %lu at off: %#lx\n",
 		      iovcnt, nbytes, offset);
 
-	rc = submit_bio(READ, bio);
-	if (rc < 0) {
-		if (rc == -ENOMEM) {
-			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_NOMEM);
-			SPDK_DEBUGLOG(SPDK_LOG_IMPL, "%s: submit_bio(READ) returned ENOMEM\n", __func__);
-		} else {
-			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_FAILED);
-			SPDK_ERRLOG("%s: submit_bio(READ) returned %d\n", __func__, rc);
-		}
-		//XXXXX free the page array
-		return -1;
-	}
-	impl_ch->io_inflight++;
-	return nbytes;
+	err = submit_bio(READ, bio);
+	if (err) {
+		bio->bi_error = err;
+		do_callback(bio);
+	} else
+		bio_ch->io_inflight++;
 }
 
-static int64_t
-bdev_impl_writev(struct file_disk *fdisk, struct spdk_io_channel *ch,
-		struct bdev_impl_task *bdev_task,
-		struct iovec *iov, int iovcnt, size_t nbytes, uint64_t offset)
+static void
+bdev_bio_writev(struct file_disk *fdisk, struct spdk_io_channel *ch,
+	       struct bdev_bio_task *bdev_task,
+	       struct iovec *iov, int iovcnt, uint64_t nbytes, uint64_t offset)
 {
-	struct bdev_impl_io_channel *impl_ch = spdk_io_channel_get_ctx(ch);
-	int rc;
+	struct bdev_bio_io_channel *bio_ch = spdk_io_channel_get_ctx(ch);
+	error_t err;
 
-	struct bio * bio = bdev_bio_alloc_set(fdisk->bdev, iov, iovcnt, nbytes, offset);
-	bio->bi_private = bdev_task;
+	struct bio * bio = bdev_bio_alloc_set(fdisk->bdev, iov, iovcnt, nbytes, offset, bdev_task);
+	if (IS_ERR(bio)) {
+		int status = PTR_ERR(bio) == -ENOMEM
+				? SPDK_BDEV_IO_STATUS_NOMEM
+			  	: SPDK_BDEV_IO_STATUS_FAILED;
+		spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), status);
+		return;
+	}
 
-	bdev_task->ch = impl_ch;
+	bdev_task->ch = bio_ch;
 
-	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "write %d iovs size %lu at off: %#lx\n",
+	SPDK_DEBUGLOG(SPDK_LOG_BIO, "write %d iovs size %lu at off: %#lx\n",
 		      iovcnt, nbytes, offset);
 
-	rc = submit_bio(WRITE, bio);
-	if (rc < 0) {
-		if (rc == -ENOMEM) {
-			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_NOMEM);
-			SPDK_DEBUGLOG(SPDK_LOG_IMPL, "%s: submit_bio(WRITE) returned ENOMEM\n", __func__);
-		} else {
-			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_FAILED);
-			SPDK_ERRLOG("%s: submit_bio(WRITE) returned %d\n", __func__, rc);
-		}
-		//XXXXX free the page array
-		return -1;
-	}
-	impl_ch->io_inflight++;
-	return nbytes;
+	err = submit_bio(WRITE, bio);
+	if (err) {
+		bio->bi_error = err;
+		do_callback(bio);
+	} else
+		bio_ch->io_inflight++;
 }
 
-static int
-bdev_impl_flush(struct file_disk *fdisk, struct spdk_io_channel *ch, struct bdev_impl_task *bdev_task)
+static void
+bdev_bio_flush(struct file_disk *fdisk, struct spdk_io_channel *ch, struct bdev_bio_task *bdev_task)
 {
-	struct bdev_impl_io_channel *impl_ch = spdk_io_channel_get_ctx(ch);
-	int rc;
+#if 0
+	struct bdev_bio_io_channel *bio_ch = spdk_io_channel_get_ctx(ch);
+	error_t err;
+#endif
 
-	struct bio * bio = bdev_bio_alloc_set(fdisk->bdev, NULL, 0, 0, 0);
-	bio->bi_private = bdev_task;
-
-	bdev_task->ch = impl_ch;
-
-	SPDK_DEBUGLOG(SPDK_LOG_IMPL, "flush\n");
-
-	rc = submit_bio(WRITE|REQ_BARRIER, bio);	//XXX check this!
-	if (rc < 0) {
-		if (rc == -ENOMEM) {
-			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_NOMEM);
-		} else {
-			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), SPDK_BDEV_IO_STATUS_FAILED);
-			SPDK_ERRLOG("%s: submit_bio(FLUSH) returned %d\n", __func__, rc);
-		}
-		return -1;
+	struct bio * bio = bdev_bio_alloc_set(fdisk->bdev, NULL, 0, 0, 0, bdev_task);
+	if (IS_ERR(bio)) {
+		int status = PTR_ERR(bio) == -ENOMEM
+				? SPDK_BDEV_IO_STATUS_NOMEM
+			  	: SPDK_BDEV_IO_STATUS_FAILED;
+		spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_task), status);
+		return;
 	}
-	impl_ch->io_inflight++;
-	return 0;
+
+#if 0	//XXXXXX flush disabled
+	bdev_task->ch = bio_ch;
+
+	SPDK_DEBUGLOG(SPDK_LOG_BIO, "flush\n");
+
+	err = submit_bio(WRITE|REQ_BARRIER, bio);	//XXX check this!
+	if (err) {
+		bio->bi_error = err;
+		do_callback(bio);
+	} else
+		bio_ch->io_inflight++;
+#else
+	do_callback(bio);
+#endif
 }
 
 static uint64_t
-bdev_impl_get_size(struct file_disk *fdisk)
+bdev_bio_get_size(struct file_disk *fdisk)
 {
 	return fdisk->bdev->bd_inode->i_size;
 }
 
 static uint32_t
-bdev_impl_get_blocklen(struct file_disk *fdisk)
+bdev_bio_get_blocklen(struct file_disk *fdisk)
 {
 	return 1u << fdisk->bdev->bd_inode->i_blkbits;
 }
 
 /******************************************************************************/
 
-static void impl_free_disk(struct file_disk *fdisk)
+static void bio_free_disk(struct file_disk *fdisk)
 {
 	if (fdisk == NULL) {
 		return;
@@ -343,28 +357,28 @@ static void impl_free_disk(struct file_disk *fdisk)
 }
 
 static int
-bdev_impl_destruct(void *ctx)
+bdev_bio_destruct(void *ctx)
 {
 	struct file_disk *fdisk = ctx;
 	int rc = 0;
 
-	TAILQ_REMOVE(&g_impl_disk_head, fdisk, link);
-	rc = bdev_impl_close(fdisk);
+	TAILQ_REMOVE(&g_bio_disk_head, fdisk, link);
+	rc = bdev_bio_close(fdisk);
 	if (rc < 0) {
-		SPDK_ERRLOG("bdev_impl_close() failed\n");
+		SPDK_ERRLOG("bdev_bio_close() failed\n");
 	}
 	spdk_io_device_unregister(fdisk, NULL);
-	impl_free_disk(fdisk);
+	bio_free_disk(fdisk);
 	return rc;
 }
 
 static void
-_bdev_impl_get_io_inflight(struct spdk_io_channel_iter *i)
+_bdev_bio_get_io_inflight(struct spdk_io_channel_iter *i)
 {
 	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
-	struct bdev_impl_io_channel *impl_ch = spdk_io_channel_get_ctx(ch);
+	struct bdev_bio_io_channel *bio_ch = spdk_io_channel_get_ctx(ch);
 
-	if (impl_ch->io_inflight) {
+	if (bio_ch->io_inflight) {
 		spdk_for_each_channel_continue(i, -1);
 		return;
 	}
@@ -372,15 +386,15 @@ _bdev_impl_get_io_inflight(struct spdk_io_channel_iter *i)
 	spdk_for_each_channel_continue(i, 0);
 }
 
-static int bdev_impl_reset_retry_timer(void *arg);
+static int bdev_bio_reset_retry_timer(void *arg);
 
 static void
-_bdev_impl_get_io_inflight_done(struct spdk_io_channel_iter *i, int status)
+_bdev_bio_get_io_inflight_done(struct spdk_io_channel_iter *i, int status)
 {
 	struct file_disk *fdisk = spdk_io_channel_iter_get_ctx(i);
 
 	if (status == -1) {
-		fdisk->reset_retry_timer = spdk_poller_register(bdev_impl_reset_retry_timer, fdisk, 500);
+		fdisk->reset_retry_timer = spdk_poller_register(bdev_bio_reset_retry_timer, fdisk, 500);
 		return;
 	}
 
@@ -388,7 +402,7 @@ _bdev_impl_get_io_inflight_done(struct spdk_io_channel_iter *i, int status)
 }
 
 static int
-bdev_impl_reset_retry_timer(void *arg)
+bdev_bio_reset_retry_timer(void *arg)
 {
 	struct file_disk *fdisk = arg;
 
@@ -397,23 +411,23 @@ bdev_impl_reset_retry_timer(void *arg)
 	}
 
 	spdk_for_each_channel(fdisk,
-			      _bdev_impl_get_io_inflight,
+			      _bdev_bio_get_io_inflight,
 			      fdisk,
-			      _bdev_impl_get_io_inflight_done);
+			      _bdev_bio_get_io_inflight_done);
 
 	return -1;
 }
 
 static void
-bdev_impl_reset(struct file_disk *fdisk, struct bdev_impl_task *bdev_task)
+bdev_bio_reset(struct file_disk *fdisk, struct bdev_bio_task *bdev_task)
 {
 	fdisk->reset_task = bdev_task;
 
-	bdev_impl_reset_retry_timer(fdisk);
+	bdev_bio_reset_retry_timer(fdisk);
 }
 
 static void
-bdev_impl_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
+bdev_bio_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
 		    bool success)
 {
 	if (!success) {
@@ -424,18 +438,18 @@ bdev_impl_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
 
 	switch (bdev_io->type) {
 	case SPDK_BDEV_IO_TYPE_READ:
-		bdev_impl_readv((struct file_disk *)bdev_io->bdev->ctxt,
+		bdev_bio_readv((struct file_disk *)bdev_io->bdev->ctxt,
 			       ch,
-			       (struct bdev_impl_task *)bdev_io->driver_ctx,
+			       (struct bdev_bio_task *)bdev_io->driver_ctx,
 			       bdev_io->u.bdev.iovs,
 			       bdev_io->u.bdev.iovcnt,
 			       bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen,
 			       bdev_io->u.bdev.offset_blocks * bdev_io->bdev->blocklen);
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE:
-		bdev_impl_writev((struct file_disk *)bdev_io->bdev->ctxt,
+		bdev_bio_writev((struct file_disk *)bdev_io->bdev->ctxt,
 				ch,
-				(struct bdev_impl_task *)bdev_io->driver_ctx,
+				(struct bdev_bio_task *)bdev_io->driver_ctx,
 			        bdev_io->u.bdev.iovs,
 				bdev_io->u.bdev.iovcnt,
 				bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen,
@@ -447,7 +461,7 @@ bdev_impl_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
 	}
 }
 
-static int _bdev_impl_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
+static int _bdev_bio_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
 	switch (bdev_io->type) {
 	/* Read and write operations must be performed on buffers aligned to
@@ -455,33 +469,33 @@ static int _bdev_impl_submit_request(struct spdk_io_channel *ch, struct spdk_bde
 	 * get the aligned buffer from the pool by calling spdk_bdev_io_get_buf. */
 	case SPDK_BDEV_IO_TYPE_READ:
 	case SPDK_BDEV_IO_TYPE_WRITE:
-		spdk_bdev_io_get_buf(bdev_io, bdev_impl_get_buf_cb,
+		spdk_bdev_io_get_buf(bdev_io, bdev_bio_get_buf_cb,
 				     bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen);
 		return 0;
 	case SPDK_BDEV_IO_TYPE_FLUSH:
-		bdev_impl_flush((struct file_disk *)bdev_io->bdev->ctxt,
+		bdev_bio_flush((struct file_disk *)bdev_io->bdev->ctxt,
 				ch,
-			       (struct bdev_impl_task *)bdev_io->driver_ctx);
+			       (struct bdev_bio_task *)bdev_io->driver_ctx);
 		return 0;
 
 	case SPDK_BDEV_IO_TYPE_RESET:
-		bdev_impl_reset((struct file_disk *)bdev_io->bdev->ctxt,
-			       (struct bdev_impl_task *)bdev_io->driver_ctx);
+		bdev_bio_reset((struct file_disk *)bdev_io->bdev->ctxt,
+			       (struct bdev_bio_task *)bdev_io->driver_ctx);
 		return 0;
 	default:
 		return -1;
 	}
 }
 
-static void bdev_impl_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
+static void bdev_bio_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
-	if (_bdev_impl_submit_request(ch, bdev_io) < 0) {
+	if (_bdev_bio_submit_request(ch, bdev_io) < 0) {
 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
 	}
 }
 
 static bool
-bdev_impl_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
+bdev_bio_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 {
 	switch (io_type) {
 	case SPDK_BDEV_IO_TYPE_READ:
@@ -496,18 +510,18 @@ bdev_impl_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 }
 
 static int
-bdev_impl_create_cb(void *io_device, void *ctx_buf)
+bdev_bio_create_cb(void *io_device, void *ctx_buf)
 {
 	return 0;
 }
 
 static void
-bdev_impl_destroy_cb(void *io_device, void *ctx_buf)
+bdev_bio_destroy_cb(void *io_device, void *ctx_buf)
 {
 }
 
 static struct spdk_io_channel *
-bdev_impl_get_io_channel(void *ctx)
+bdev_bio_get_io_channel(void *ctx)
 {
 	struct file_disk *fdisk = ctx;
 
@@ -516,11 +530,11 @@ bdev_impl_get_io_channel(void *ctx)
 
 
 static int
-bdev_impl_dump_info_json(void *ctx, struct spdk_json_write_ctx *w)
+bdev_bio_dump_info_json(void *ctx, struct spdk_json_write_ctx *w)
 {
 	struct file_disk *fdisk = ctx;
 
-	spdk_json_write_named_object_begin(w, impl_name_str);
+	spdk_json_write_named_object_begin(w, "bio");
 
 	spdk_json_write_named_string(w, "filename", fdisk->filename);
 
@@ -530,35 +544,33 @@ bdev_impl_dump_info_json(void *ctx, struct spdk_json_write_ctx *w)
 }
 
 static void
-bdev_impl_write_json_config(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w)
+bdev_bio_write_json_config(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w)
 {
 	struct file_disk *fdisk = bdev->ctxt;
 
 	spdk_json_write_object_begin(w);
 
-	spdk_json_write_named_string(w, "method", "bdev_impl_create");
+	spdk_json_write_named_string(w, "method", "bdev_bio_create");
 
 	spdk_json_write_named_object_begin(w, "params");
 	spdk_json_write_named_string(w, "name", bdev->name);
 	spdk_json_write_named_string(w, "filename", fdisk->filename);
-	if (fdisk->helper_cmd)
-		spdk_json_write_named_string(w, "helper_cmd", fdisk->helper_cmd);
 	spdk_json_write_object_end(w);
 
 	spdk_json_write_object_end(w);
 }
 
-static const struct spdk_bdev_fn_table impl_fn_table = {
-	.destruct		= bdev_impl_destruct,
-	.submit_request		= bdev_impl_submit_request,
-	.io_type_supported	= bdev_impl_io_type_supported,
-	.get_io_channel		= bdev_impl_get_io_channel,
-	.dump_info_json		= bdev_impl_dump_info_json,
-	.write_config_json	= bdev_impl_write_json_config,
+static const struct spdk_bdev_fn_table bio_fn_table = {
+	.destruct		= bdev_bio_destruct,
+	.submit_request		= bdev_bio_submit_request,
+	.io_type_supported	= bdev_bio_io_type_supported,
+	.get_io_channel		= bdev_bio_get_io_channel,
+	.dump_info_json		= bdev_bio_dump_info_json,
+	.write_config_json	= bdev_bio_write_json_config,
 };
 
 int
-create_impl_bdev(const char * spdk_name, const char * impl_name, const char * helper_cmd)
+create_bdev_bio(const char * spdk_name, const char * bio_name)
 {
 	struct file_disk *fdisk;
 	uint32_t detected_block_size;
@@ -568,36 +580,35 @@ create_impl_bdev(const char * spdk_name, const char * impl_name, const char * he
 
 	fdisk = calloc(1, sizeof(*fdisk));
 	if (!fdisk) {
-		SPDK_ERRLOG("Unable to allocate memory for "impl_name_str" backend\n");
+		SPDK_ERRLOG("Unable to allocate memory for bio backend\n");
 		return -ENOMEM;
 	}
 
-	fdisk->helper_cmd = helper_cmd;
-	fdisk->filename = strdup(impl_name);
+	fdisk->filename = strdup(bio_name);
 	if (!fdisk->filename) {
 		rc = -ENOMEM;
 		goto error_return;
 	}
 
-	rc = bdev_impl_open(fdisk);
+	rc = bdev_bio_open(fdisk);
 	if (rc) {
-		SPDK_ERRLOG("Unable to open %s (%s)\n", impl_name, fdisk->filename);
+		SPDK_ERRLOG("Unable to open %s (%s)\n", bio_name, fdisk->filename);
 		goto error_return;
 	}
 
-	disk_size = bdev_impl_get_size(fdisk);
+	disk_size = bdev_bio_get_size(fdisk);
 
 	fdisk->disk.name = strdup(spdk_name);
 	if (!fdisk->disk.name) {
 		rc = -ENOMEM;
 		goto error_return;
 	}
-	fdisk->disk.product_name = IMPL_NAME_STR" disk";
-	fdisk->disk.module = &impl_if;
+	fdisk->disk.product_name = "BIO disk";
+	fdisk->disk.module = &bio_if;
 
 	fdisk->disk.write_cache = 1;
 
-	detected_block_size = bdev_impl_get_blocklen(fdisk);
+	detected_block_size = bdev_bio_get_blocklen(fdisk);
 	if (block_size == 0) {
 		/* User did not specify block size - use autodetected block size. */
 		if (detected_block_size == 0) {
@@ -647,10 +658,10 @@ create_impl_bdev(const char * spdk_name, const char * impl_name, const char * he
 	fdisk->disk.blockcnt = disk_size / fdisk->disk.blocklen;
 	fdisk->disk.ctxt = fdisk;
 
-	fdisk->disk.fn_table = &impl_fn_table;
+	fdisk->disk.fn_table = &bio_fn_table;
 
-	spdk_io_device_register(fdisk, bdev_impl_create_cb, bdev_impl_destroy_cb,
-				sizeof(struct bdev_impl_io_channel),
+	spdk_io_device_register(fdisk, bdev_bio_create_cb, bdev_bio_destroy_cb,
+				sizeof(struct bdev_bio_io_channel),
 				fdisk->disk.name);
 	rc = spdk_bdev_register(&fdisk->disk);
 	if (rc) {
@@ -659,35 +670,35 @@ create_impl_bdev(const char * spdk_name, const char * impl_name, const char * he
 		goto error_return;
 	}
 
-	TAILQ_INSERT_TAIL(&g_impl_disk_head, fdisk, link);
+	TAILQ_INSERT_TAIL(&g_bio_disk_head, fdisk, link);
 	return 0;
 
 error_return:
-	bdev_impl_close(fdisk);
-	impl_free_disk(fdisk);
+	bdev_bio_close(fdisk);
+	bio_free_disk(fdisk);
 	return rc;
 }
 
-struct delete_impl_bdev_ctx {
-	delete_impl_bdev_complete cb_fn;
+struct delete_bdev_bio_ctx {
+	delete_bdev_bio_complete cb_fn;
 	void *cb_arg;
 };
 
 static void
-impl_bdev_unregister_cb(void *arg, int bdeverrno)
+bdev_bio_unregister_cb(void *arg, int bdeverrno)
 {
-	struct delete_impl_bdev_ctx *ctx = arg;
+	struct delete_bdev_bio_ctx *ctx = arg;
 
 	ctx->cb_fn(ctx->cb_arg, bdeverrno);
 	free(ctx);
 }
 
 void
-bdev_impl_delete(struct spdk_bdev *bdev, delete_impl_bdev_complete cb_fn, void *cb_arg)
+bdev_bio_delete(struct spdk_bdev *bdev, delete_bdev_bio_complete cb_fn, void *cb_arg)
 {
-	struct delete_impl_bdev_ctx *ctx;
+	struct delete_bdev_bio_ctx *ctx;
 
-	if (!bdev || bdev->module != &impl_if) {
+	if (!bdev || bdev->module != &bio_if) {
 		cb_fn(cb_arg, -ENODEV);
 		return;
 	}
@@ -700,103 +711,75 @@ bdev_impl_delete(struct spdk_bdev *bdev, delete_impl_bdev_complete cb_fn, void *
 
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
-	spdk_bdev_unregister(bdev, impl_bdev_unregister_cb, ctx);
+	spdk_bdev_unregister(bdev, bdev_bio_unregister_cb, ctx);
 }
 
 static int
-bdev_impl_initialize(void)
+bdev_bio_initialize(void)
 {
 	size_t i;
 	struct spdk_conf_section *sp;
 
-	TAILQ_INIT(&g_impl_disk_head);
+	TAILQ_INIT(&g_bio_disk_head);
 
-	sp = spdk_conf_find_section(NULL, IMPL_NAME_STR);
+	sp = spdk_conf_find_section(NULL, "BIO");
 	if (!sp) {
 		return 0;
 	}
 
-	i = 0;
-	while (true) {
+	for (i = 0 ; ; i++) {
 		int rc;
 		const char *file;
 		const char *name;
-		const char *helper;
-		char *cmd = NULL;
 
-		name = spdk_conf_section_get_nmval(sp, IMPL_NAME_STR, i, 0);
+		name = spdk_conf_section_get_nmval(sp, "BIO", i, 0);
 		if (!name) {
 			break;
 		}
 
-		file = spdk_conf_section_get_nmval(sp, IMPL_NAME_STR, i, 1);
+		file = spdk_conf_section_get_nmval(sp, "BIO", i, 1);
 		if (!file) {
-			SPDK_ERRLOG("No bio_name name provided for "IMPL_NAME_STR" %s\n", name);
-			i++;
+			SPDK_ERRLOG("No bio_name name provided for BIO %s\n", name);
 			continue;
 		}
 
-		/* Helper can issue commands to bio module via its native admin interface */
-		//XXX probably a better way to just get the rest of the line?
-		helper = spdk_conf_section_get_nmval(sp, IMPL_NAME_STR, i, 2);
-		if (helper) {
-			const char * arg1 = spdk_conf_section_get_nmval(sp, IMPL_NAME_STR, i, 3);
-			const char * arg2 = spdk_conf_section_get_nmval(sp, IMPL_NAME_STR, i, 4);
-			if (asprintf(&cmd, "%s %s %s", helper, arg1?:"", arg2?:"") > 0) {
-				SPDK_NOTICELOG("Invoking helper: %s\n", cmd);
-				rc = system(cmd);
-				if (rc)
-					SPDK_ERRLOG("%s returned 0x%x\n", cmd, rc);
-			}
-		}
-
-		rc = create_impl_bdev(name, file, cmd);
-		if (rc) {
-			SPDK_ERRLOG("Unable to create "IMPL_NAME_STR" %s, err is %s\n", name, spdk_strerror(-rc));
-			i++;
-			continue;
-		}
-
-		i++;
+		rc = create_bdev_bio(name, file);
+		if (rc)
+			SPDK_ERRLOG("Unable to create BIO %s, err is %s\n", name, spdk_strerror(-rc));
 	}
 
 	return 0;
 }
 
 static void
-bdev_impl_fini(void)
+bdev_bio_fini(void)
 {
-	spdk_io_device_unregister(&impl_if, NULL);
+	spdk_io_device_unregister(&bio_if, NULL);
 }
 
 static void
-bdev_impl_get_spdk_running_config(FILE *fp)
+bdev_bio_get_spdk_running_config(FILE *fp)
 {
 	char			*file;
 	char			*name;
-	const char		*helper_cmd;
 	struct file_disk	*fdisk;
 
 	fprintf(fp,
 		"\n"
-		"# Translate from SPDK BDEV protocol to kernel BIO protocol\n"
+		"# Translate from SPDK bdev protocol to kernel bio bdev protocol\n"
 		"# (SPDK front-end shim for kernel BIO modules ported to usermode)\n"
-		"# The helper allows external configuration of the BIO module\n"
+		"# bio-dev-name typically begins with '/UMCfuse/dev/'\n"
 		"# Format:\n"
-		"# BIO <spdk-bdev-name> <bio-dev-name> [ helper [ arg1 [ arg2 ] ] ]\n"
-		"["IMPL_NAME_STR"]\n");
+		"# BIO <spdk-bdev-name> <bio-dev-name>\n"
+		"[BIO]\n");
 
-	TAILQ_FOREACH(fdisk, &g_impl_disk_head, link) {
+	TAILQ_FOREACH(fdisk, &g_bio_disk_head, link) {
 		file = fdisk->filename;
 		name = fdisk->disk.name;
-		helper_cmd = fdisk->helper_cmd;
-		fprintf(fp, "  "IMPL_NAME_STR" %s %s", name, file);
-		if (helper_cmd)
-			fprintf(fp, " %s", helper_cmd);
-		fprintf(fp, "\n");
+		fprintf(fp, "  BIO %s %s\n", name, file);
 	}
 
 	fprintf(fp, "\n");
 }
 
-SPDK_LOG_REGISTER_COMPONENT(impl_name_str, SPDK_LOG_BIO)
+SPDK_LOG_REGISTER_COMPONENT("bio", SPDK_LOG_BIO)

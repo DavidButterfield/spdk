@@ -36,12 +36,17 @@ S :=
 SPDK_ROOT_DIR := $(CURDIR)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
+ifeq ($(CONFIG_DRBD),y)
 #XXX What is the right way to import a non-system archive from another repository?
-export TCMUR_ROOT_DIR := $(SPDK_ROOT_DIR)/../tcmu-runner
 export UMC_ROOT_DIR := $(SPDK_ROOT_DIR)/../usermode_compat/src
 export MTE_ROOT_DIR := $(SPDK_ROOT_DIR)/../MTE/src
 export DRBD_ROOT_DIR := $(SPDK_ROOT_DIR)/../drbd-9.0
 export SCST_ROOT_DIR := $(SPDK_ROOT_DIR)/../SCST-Usermode-Adaptation/usermode
+endif
+
+ifeq ($(CONFIG_TCMUR),y)
+export TCMUR_ROOT_DIR := $(SPDK_ROOT_DIR)/../tcmu-runner
+endif
 
 DIRS-y += lib
 DIRS-y += module

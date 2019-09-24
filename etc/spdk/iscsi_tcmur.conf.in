@@ -1,5 +1,5 @@
-# etc/spdk/iscsi.bio_conf.in
-# iSCSI target configuration file using BIO support and tcmu-runner storage handlers
+# etc/spdk/iscsi_tcmur.conf.in
+# iSCSI target configuration file using tcmu-runner storage handlers
 
 [Global]
   #SharedMemoryID 0
@@ -21,21 +21,10 @@
 [TCMUR]
 # TCMUR 0 ram_a  /ram/tmp/tcmur_ram00
 # TCMUR 1 file_a /file//tmp/tcmur_file00
-# TCMUR 2 file_b /file//tmp/tcmur_file01
-# TCMUR 5 ram_c  /ram/tmp/tcmur_ram02
 
-# Use handler_ram only
-  TCMUR 0 ram_a  /ram/tmp/tcmur_ram00
-  TCMUR 1 file_a /ram/tmp/tcmur_file00
-  TCMUR 2 file_b /ram/tmp/tcmur_file01
-  TCMUR 5 ram_c  /ram/tmp/tcmur_ram02
-
-# Translate from SPDK BDEV protocol to kernel BIO protocol
-# (SPDK front-end shim for kernel BIO modules)
-# Format:
-# BIO <spdk-bdev-name> <bio-dev-name> [ helper [ arg1 [ arg2 ] ] ]
-[BIO]
-  BIO bio0 /UMCfuse/dev/file_b
+# Use handler_file only, because it is faster than handler_ram
+  TCMUR 0 ram_a  /file//tmp/tcmur_ram00
+  TCMUR 1 file_a /file//tmp/tcmur_file00
 
 [Malloc]
   NumberOfLuns 1
@@ -77,4 +66,3 @@
   LUN1 AIO0
   LUN2 ram_a
   LUN3 file_a
-  LUN4 bio0

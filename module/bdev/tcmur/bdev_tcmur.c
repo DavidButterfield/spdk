@@ -33,7 +33,6 @@
  */
 #include "spdk/config.h" 	/* for SPDK_CONFIG_DRBD */
 
-#define impl_name			tcmur
 #define impl_name_str			"tcmur"
 #define IMPL_NAME_STR			"TCMUR"
 #define create_impl_bdev		create_tcmur_bdev
@@ -113,7 +112,7 @@ static struct spdk_bdev_module impl_if = {
 	.get_ctx_size	= bdev_impl_get_ctx_size,
 };
 
-SPDK_BDEV_MODULE_REGISTER(impl_name, &impl_if)
+SPDK_BDEV_MODULE_REGISTER(tcmur, &impl_if)
 
 /******************************************************************************/
 /* call the tcmur operations */
@@ -524,9 +523,10 @@ bdev_impl_write_json_config(struct spdk_bdev *bdev, struct spdk_json_write_ctx *
 
 	spdk_json_write_object_begin(w);
 
-	spdk_json_write_named_string(w, "method", "bdev_impl_create");
+	spdk_json_write_named_string(w, "method", "bdev_tcmur_create");
 
 	spdk_json_write_named_object_begin(w, "params");
+	spdk_json_write_named_uint32(w, "minor", fdisk->fd);
 	spdk_json_write_named_string(w, "name", bdev->name);
 	spdk_json_write_named_string(w, "cfgstr", fdisk->cfgstr);
 	spdk_json_write_object_end(w);

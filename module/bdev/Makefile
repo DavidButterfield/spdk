@@ -48,6 +48,7 @@ ifeq ($(OS),Linux)
 DIRS-y += aio
 DIRS-$(CONFIG_TCMUR) += tcmur
 DIRS-$(CONFIG_DRBD) += bio
+DIRS-$(CONFIG_DRBD) += bio_spdk
 DIRS-$(CONFIG_ISCSI_INITIATOR) += iscsi
 DIRS-$(CONFIG_VIRTIO) += virtio
 DIRS-$(CONFIG_PMDK) += pmem

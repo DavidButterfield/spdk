@@ -316,6 +316,81 @@ def bdev_aio_delete(client, name):
     return client.call('bdev_aio_delete', params)
 
 
+def bdev_bio_create(client, filename, name):
+    """Construct a Linux BIO block device.
+
+    Args:
+        filename: path to bio bdev (ex: /UMCfuse/dev/drbd1)
+        name: name of block device
+
+    Returns:
+        Name of created block device.
+    """
+    params = {'name': name,
+              'filename': filename}
+
+    return client.call('bdev_bio_create', params)
+
+def bdev_bio_delete(client, name):
+    """Remove bio bdev from the system.
+
+    Args:
+        bdev_name: name of bio bdev to delete
+    """
+    params = {'name': name}
+    return client.call('bdev_bio_delete', params)
+
+
+def bio_spdk_create(client, name):
+    """Provide bio bdev front-end to SPDK bdev
+
+    Args:
+        name: name of block device
+
+    Returns:
+        Name of created bio device.
+    """
+    params = {'name': name}
+
+    return client.call('bio_spdk_create', params)
+
+def bio_spdk_delete(client, name):
+    """Remove bio bdev front-end from SPDK bdev.
+
+    Args:
+        bdev_name: name of SPDK bdev
+    """
+    params = {'name': name}
+    return client.call('bio_spdk_delete', params)
+
+
+def bdev_tcmur_create(client, minor, name, cfgstr):
+    """Construct a tcmu-runner block device.
+
+    Args:
+        minor: minor number to assign to this device
+        name: name to assign to this block device
+        cfgstr: tcmu-runner handler configuration string (e.g. /file//tmp/foo)
+
+    Returns:
+        Name of created block device.
+    """
+    params = {'minor': minor,
+              'name': name,
+              'cfgstr': cfgstr}
+
+    return client.call('bdev_tcmur_create', params)
+
+def bdev_tcmur_delete(client, name):
+    """Remove tcmur bdev from the system.
+
+    Args:
+        bdev_name: name of tcmur bdev to delete
+    """
+    params = {'name': name}
+    return client.call('bdev_tcmur_delete', params)
+
+
 @deprecated_alias('set_bdev_nvme_options')
 def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, retry_count=None,
                           nvme_adminq_poll_period_us=None, nvme_ioq_poll_period_us=None, io_queue_requests=None):

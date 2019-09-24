@@ -102,7 +102,6 @@ git clone https://github.com/DavidButterfield/SCST-Usermode-Adaptation.git
     git submodule update --init; \
     ./configure --enable-debug --with-tcmur --with-drbd; \
     make;
-    sudo cp drbdadm_up_primary /usr/sbin	# DRBD config helper
 )
 
 echo ""
@@ -111,19 +110,19 @@ echo "Executable:  " `ls -l spdk/app/iscsi_tgt/iscsi_tgt`
 # Create backing files in /tmp for the default configuration
 echo ""
 echo -n "Creating default backing files in /tmp..."
-sudo truncate --size=2G /tmp/tcmur_ram00;    sudo chmod 666 /tmp/tcmur_ram00
-sudo truncate --size=2G /tmp/tcmur_ram01;    sudo chmod 666 /tmp/tcmur_ram01
-sudo truncate --size=2G /tmp/tcmur_ram02;    sudo chmod 666 /tmp/tcmur_ram02
-sudo truncate --size=2G /tmp/tcmur_file00;   sudo chmod 666 /tmp/tcmur_file00
-sudo truncate --size=2G /tmp/tcmur_file01;   sudo chmod 666 /tmp/tcmur_file01
-sudo truncate --size=2G /tmp/tcmur_file02;   sudo chmod 666 /tmp/tcmur_file02
-sudo truncate --size=2G /tmp/myfile;         sudo chmod 666 /tmp/myfile
+sudo truncate --size=1G /tmp/tcmur_ram00;    sudo chmod 666 /tmp/tcmur_ram00
+sudo truncate --size=1G /tmp/tcmur_ram01;    sudo chmod 666 /tmp/tcmur_ram01
+sudo truncate --size=1G /tmp/tcmur_ram02;    sudo chmod 666 /tmp/tcmur_ram02
+sudo truncate --size=1G /tmp/tcmur_file00;   sudo chmod 666 /tmp/tcmur_file00
+sudo truncate --size=1G /tmp/tcmur_file01;   sudo chmod 666 /tmp/tcmur_file01
+sudo truncate --size=1G /tmp/tcmur_file02;   sudo chmod 666 /tmp/tcmur_file02
+sudo truncate --size=1G /tmp/myfile;         sudo chmod 666 /tmp/myfile
 echo " ...done"
 
 # Create DRBD config file to match spdk/etc/spdk/iscsi.drbd_conf.in
 echo ""
-echo "Copy spdk/module/bdev/bio/spdk1.res.example to /etc/drbd.d/spdk1.res"
-echo "     and modify it to match your local names, IP addresses, etc."
+echo "Copy spdk/etc/drbd.d/*.res to /etc/drbd.d"
+echo "     and modify them to match your local names, IP addresses, etc."
 
 echo ""
 echo "Server process and DRBD utilities must be run with:"
@@ -132,10 +131,11 @@ echo ""
 echo "Use sudo -E to pass the environment variable from your shell through sudo"
 
 echo ""
-echo "To run default test configuration:"
+echo "To run example test configuration:"
+echo "    # Modify spdk/etc/spdk/iscsi_drbd.conf.sh.in to suit your environment"
 echo "    export UMC_FS_ROOT=/UMCfuse"
-echo "    sudo -E spdk/app/iscsi_tgt/iscsi_tgt -c spdk/etc/spdk/iscsi.drbd_conf.in"
+echo "    sudo -E spdk/app/iscsi_tgt/iscsi_tgt"
 echo ""
-echo "NOTE:  So far only has been tested using the 'file' and 'ram' tcmur handlers."
-echo "       Needs testing on an async handler (nr_threads == 0)!"
+echo "In another window:"
+echo "    sudo spdk/etc/spdk/iscsi_drbd.conf.sh.in"
 echo ""

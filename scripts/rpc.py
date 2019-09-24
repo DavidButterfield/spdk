@@ -318,6 +318,61 @@ if __name__ == "__main__":
     p.add_argument('name', help='aio bdev name')
     p.set_defaults(func=bdev_aio_delete)
 
+
+    def bdev_bio_create(args):
+        print_json(rpc.bdev.bdev_bio_create(args.client,
+                                            filename=args.filename,
+                                            name=args.name))
+
+    p = subparsers.add_parser('bdev_bio_create', help='Add an SPDK bdev frontend to a bio bdev')
+    p.add_argument('filename', help='Path to bio name (ex: /UMCfuse/dev/drbd1)')
+    p.add_argument('name', help='Block device name')
+    p.set_defaults(func=bdev_bio_create)
+
+    def delete_bdev_bio(args):
+        rpc.bdev.delete_bdev_bio(args.client, name=args.name)
+
+    p = subparsers.add_parser('delete_bdev_bio', help='Delete a bio disk')
+    p.add_argument('name', help='bio bdev name')
+    p.set_defaults(func=delete_bdev_bio)
+
+
+    def bio_spdk_create(args):
+        print_json(rpc.bdev.bio_spdk_create(args.client, name=args.name))
+
+    p = subparsers.add_parser('bio_spdk_create', help='Add a bio bdev frontend to an SPDK bdev')
+    p.add_argument('name', help='Block device name')
+    p.set_defaults(func=bio_spdk_create)
+
+    def delete_bio_spdk(args):
+        rpc.bdev.delete_bio_spdk(args.client, name=args.name)
+
+    p = subparsers.add_parser('delete_bio_spdk', help='Delete a bio_spdk interface')
+    p.add_argument('name', help='SPDK bdev name')
+    p.set_defaults(func=delete_bio_spdk)
+
+
+    def bdev_tcmur_create(args):
+        print_json(rpc.bdev.bdev_tcmur_create(args.client,
+                                            minor=args.minor,
+                                            name=args.name,
+                                            cfgstr=args.cfgstr))
+
+    p = subparsers.add_parser('bdev_tcmur_create', help='Add a bdev with tcmu-runner handler backend')
+    p.add_argument('minor', help='minor number to assign to this device', type=int)
+    p.add_argument('name', help='name to assign to this device')
+    p.add_argument('cfgstr', help='tcmu-runner handler configuration string (e.g. /file//tmp/foo')
+    p.set_defaults(func=bdev_tcmur_create)
+
+    def delete_bdev_tcmur(args):
+        rpc.bdev.delete_bdev_tcmur(args.client,
+                                    name=args.name)
+
+    p = subparsers.add_parser('delete_bdev_tcmur', help='Delete a tcmur disk')
+    p.add_argument('name', help='tcmur device name')
+    p.set_defaults(func=delete_bdev_tcmur)
+
+
     def bdev_nvme_set_options(args):
         rpc.bdev.bdev_nvme_set_options(args.client,
                                        action_on_timeout=args.action_on_timeout,

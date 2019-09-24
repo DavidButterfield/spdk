@@ -42,15 +42,16 @@ echo "Executable:  " `ls -l spdk/app/iscsi_tgt/iscsi_tgt`
 # Create backing files in /tmp for the default configuration
 echo ""
 echo -n "Creating default backing files in /tmp..."
-sudo truncate --size=2G /tmp/tcmur_ram00;    sudo chmod 666 /tmp/tcmur_ram00
-sudo truncate --size=2G /tmp/tcmur_file00;   sudo chmod 666 /tmp/tcmur_file00
-sudo truncate --size=2G /tmp/myfile;         sudo chmod 666 /tmp/myfile
+sudo truncate --size=1G /tmp/tcmur_ram00;    sudo chmod 666 /tmp/tcmur_ram00
+sudo truncate --size=1G /tmp/tcmur_file00;   sudo chmod 666 /tmp/tcmur_file00
+sudo truncate --size=1G /tmp/myfile;         sudo chmod 666 /tmp/myfile
 echo " ...done"
 
 echo ""
-echo "To run default test configuration:"
+echo "To run example test configuration:"
+echo "    # Modify spdk/etc/spdk/iscsi_tcmur.conf.in to suit your environment"
 echo "    export UMC_FS_ROOT=/UMCfuse"
-echo "    sudo -E spdk/app/iscsi_tgt/iscsi_tgt -c spdk/etc/spdk/iscsi.tcmur_conf.in"
+echo "    sudo -E spdk/app/iscsi_tgt/iscsi_tgt -c spdk/etc/spdk/iscsi_tcmur.conf.in"
 echo ""
 echo "NOTE:  So far only has been tested using the 'file' and 'ram' tcmur handlers."
 echo "       Needs testing on an async handler (nr_threads == 0)!"

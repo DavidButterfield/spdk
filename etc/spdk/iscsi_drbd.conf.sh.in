@@ -1,0 +1,201 @@
+#!/bin/bash
+#
+# NOTE: This file must be customized for your names, addresses, etc before use!
+#
+# iscsi_drbd.conf.sh.in creates a configuration with bdev_malloc backing DRBD
+# (Distributed Replicated Block Device) running under SPDK in usermode.
+#
+# DRBD uses the kernel's block-I/O (bio) protocol to communicate both upward
+# (toward clients) and downward (toward storage).
+#
+# The bdev_bio module translates SPDK bdev requests into bio bdev requests.
+# The bio_spdk module translates bio requests into SPDK bdev requests.
+#
+# This script creates a configuration with LUNs and {modules} configured as follows:
+# LUN SPDKname                  BIOname        BIOname              SPDKname
+# --- --------                  -------        -------              --------
+#  0  Malloc0     {bdev_malloc}
+#  4  bio_Malloc1 {bdev_bio}                   Malloc1  {bio_spdk}  Malloc1
+#  6  bio_drbd3   {bdev_bio}    drbd3  {DRBD}  Malloc2  {bio_spdk}  Malloc2
+#
+# This configuration can only be made through JSON RPC.  It is not possible to
+# create using the SPDK conf files because DRBD has to be configured (using its
+# native configuration utility programs) partway through the SPDK configuration,
+# after the Malloc devices it depends on are created, but before creation of
+# the iSCSI LUNs that depend on it.
+
+rootdir=$(readlink -f $(dirname $0))/../..
+
+set -x
+
+# Create three backing bdev_malloc devices
+sudo ${rootdir}/scripts/rpc.py load_config << //EOF//
+{
+  "subsystems": [
+    {
+      "subsystem": "bdev",
+      "config": [
+        {
+          "method": "set_bdev_options",
+          "params": {
+            "bdev_io_pool_size": 65535,
+            "bdev_io_cache_size": 256
+          }
+        },
+        {
+          "method": "bdev_malloc_create",
+          "params": {
+            "name": "Malloc0",
+            "num_blocks": 32768,
+            "block_size": 4096
+          }
+        },
+        {
+          "method": "bdev_malloc_create",
+          "params": {
+            "name": "Malloc1",
+            "num_blocks": 32768,
+            "block_size": 4096
+          }
+        },
+        {
+          "method": "bdev_malloc_create",
+          "params": {
+            "name": "Malloc2",
+            "num_blocks": 32768,
+            "block_size": 4096
+          }
+        }
+      ]
+    }
+  ]
+}
+//EOF//
+
+# Make Malloc1 and Malloc2 bdevs accessible to bio-protocol clients
+sudo ${rootdir}/scripts/rpc.py load_config << //EOF//
+{
+  "subsystems": [
+    {
+      "subsystem": "bdev",
+      "config": [
+        {
+          "method": "bio_spdk_create",
+          "params": {
+            "name": "Malloc1"
+          }
+        },
+        {
+          "method": "bio_spdk_create",
+          "params": {
+            "name": "Malloc2"
+          }
+        }
+      ]
+    }
+  ]
+}
+//EOF//
+
+sleep 1         # Give SPDK config a little time to settle
+
+# Configure DRBD device drbd3 to use Malloc2
+export UMC_FS_ROOT=/UMCfuse
+        # From /etc/drbd.d/drbd3.res:
+        #   device              drbd3 minor 3;
+        #   disk                "/UMCfuse/dev/Malloc2";
+drbdadm create-md drbd3 --force
+drbdadm up drbd3
+drbdsetup primary drbd3 --force
+
+# Make bio bdevs Malloc1 and drbd3 accessible to SPDK iSCSI client
+sudo ${rootdir}/scripts/rpc.py load_config << //EOF//
+{
+  "subsystems": [
+    {
+      "subsystem": "bdev",
+      "config": [
+        {
+          "method": "bdev_bio_create",
+          "params": {
+            "name": "bio_Malloc1",
+            "filename": "/UMCfuse/dev/Malloc1"
+          }
+        },
+        {
+          "method": "bdev_bio_create",
+          "params": {
+            "name": "bio_drbd3",
+            "filename": "/UMCfuse/dev/drbd3"
+          }
+        }
+      ]
+    }
+  ]
+}
+//EOF//
+
+# Configure SPDK devices that depend on DRBD devices
+sudo ${rootdir}/scripts/rpc.py load_config << //EOF//
+{
+  "subsystems": [
+    {
+      "subsystem": "iscsi",
+      "config": [
+        {
+          "method": "add_portal_group",
+          "params": {
+            "tag": 1,
+            "portals": [
+              {
+                "host": "192.168.1.23",
+                "port": "3260"
+              }
+            ]
+          }
+        },
+        {
+          "method": "add_initiator_group",
+          "params": {
+            "tag": 1,
+            "initiators": [
+              "ANY"
+            ],
+            "netmasks": [
+              "192.168.1.0/24"
+            ]
+          }
+        },
+        {
+          "method": "construct_target_node",
+          "params": {
+            "name": "iqn.2016-06.io.spdk:disk1",
+            "alias_name": "Data Disk1",
+            "pg_ig_maps": [
+              {
+                "pg_tag": 1,
+                "ig_tag": 1
+              }
+            ],
+            "luns": [
+              {
+                "bdev_name": "Malloc0",
+                "lun_id": 0
+              },
+              {
+                "bdev_name": "bio_Malloc1",
+                "lun_id": 4
+              },
+              {
+                "bdev_name": "bio_drbd3",
+                "lun_id": 6
+              }
+            ],
+            "queue_depth": 64
+          }
+        }
+      ]
+    }
+  ]
+}
+//EOF//

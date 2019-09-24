@@ -70,6 +70,7 @@ ifeq ($(CONFIG_TCMUR),y)
 endif
 
 ifeq ($(CONFIG_DRBD),y)
+  BLOCKDEV_MODULES_LIST += bdev_bio_spdk
   BLOCKDEV_MODULES_LIST += bdev_bio
   SYS_LIBS += $(SCST_ROOT_DIR)/drbd_compat.o $(DRBD_ROOT_DIR)/drbd/drbd.o
   # Get entire usermode-compat library because it is used by loadable tcmu-runner handlers

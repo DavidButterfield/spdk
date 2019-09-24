@@ -31,49 +31,38 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/* Hacks to work around kernel/user #include conflicts */
-#define  NO_UMC_SOCKETS
-#include "libtcmur.h"
-#undef htonl
-#undef htons
-#undef ntohl
-#undef ntohs
-#include "bdev_tcmur.h"
+/* bdev_bio_spdk_rpc.c adapted from bdev_aio_rpc.c */
+#include "bdev_bio_spdk.h"
 
 #include "spdk/rpc.h"
 #include "spdk/util.h"
 #include "spdk/string.h"
 #include "spdk_internal/log.h"
 
-struct rpc_construct_impl {
+struct rpc_construct_bio {
 	char *name;
-	uint32_t minor;
-	char *cfgstr;
 };
 
 static void
-free_rpc_construct_impl(struct rpc_construct_impl *req)
+free_rpc_construct_bio(struct rpc_construct_bio *req)
 {
 	free(req->name);
-	free(req->cfgstr);
 }
 
-static const struct spdk_json_object_decoder rpc_construct_impl_decoders[] = {
-	{"minor", offsetof(struct rpc_construct_impl, minor), spdk_json_decode_uint32, true},
-	{"name", offsetof(struct rpc_construct_impl, name), spdk_json_decode_string},
-	{"cfgstr", offsetof(struct rpc_construct_impl, cfgstr), spdk_json_decode_string},
+static const struct spdk_json_object_decoder rpc_construct_bio_decoders[] = {
+	{"name", offsetof(struct rpc_construct_bio, name), spdk_json_decode_string},
 };
 
 static void
-spdk_rpc_bdev_impl_create(struct spdk_jsonrpc_request *request,
+spdk_rpc_bio_spdk_create(struct spdk_jsonrpc_request *request,
 			 const struct spdk_json_val *params)
 {
-	struct rpc_construct_impl req = {};
+	struct rpc_construct_bio req = {};
 	struct spdk_json_write_ctx *w;
 	int rc = 0;
 
-	if (spdk_json_decode_object(params, rpc_construct_impl_decoders,
-				    SPDK_COUNTOF(rpc_construct_impl_decoders),
+	if (spdk_json_decode_object(params, rpc_construct_bio_decoders,
+				    SPDK_COUNTOF(rpc_construct_bio_decoders),
 				    &req)) {
 		SPDK_ERRLOG("spdk_json_decode_object failed\n");
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
@@ -81,38 +70,38 @@ spdk_rpc_bdev_impl_create(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	rc = create_tcmur_bdev(req.name, req.minor, req.cfgstr);
+	rc = create_bio_spdk(req.name);
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
 		goto cleanup;
 	}
-
 
 	w = spdk_jsonrpc_begin_result(request);
 	spdk_json_write_string(w, req.name);
 	spdk_jsonrpc_end_result(request, w);
 
 cleanup:
-	free_rpc_construct_impl(&req);
+	free_rpc_construct_bio(&req);
 }
-SPDK_RPC_REGISTER("bdev_tcmur_create", spdk_rpc_bdev_impl_create, SPDK_RPC_RUNTIME)
 
-struct rpc_delete_impl {
+SPDK_RPC_REGISTER("bio_spdk_create", spdk_rpc_bio_spdk_create, SPDK_RPC_RUNTIME)
+
+struct rpc_delete_bio {
 	char *name;
 };
 
 static void
-free_rpc_delete_impl(struct rpc_delete_impl *r)
+free_rpc_delete_bio(struct rpc_delete_bio *r)
 {
 	free(r->name);
 }
 
-static const struct spdk_json_object_decoder rpc_delete_impl_decoders[] = {
-	{"name", offsetof(struct rpc_delete_impl, name), spdk_json_decode_string},
+static const struct spdk_json_object_decoder rpc_delete_bio_decoders[] = {
+	{"name", offsetof(struct rpc_delete_bio, name), spdk_json_decode_string},
 };
 
 static void
-_spdk_rpc_bdev_impl_delete_cb(void *cb_arg, int bdeverrno)
+_spdk_rpc_bio_spdk_delete_cb(void *cb_arg, int bdeverrno)
 {
 	struct spdk_jsonrpc_request *request = cb_arg;
 	struct spdk_json_write_ctx *w = spdk_jsonrpc_begin_result(request);
@@ -122,33 +111,23 @@ _spdk_rpc_bdev_impl_delete_cb(void *cb_arg, int bdeverrno)
 }
 
 static void
-spdk_rpc_bdev_impl_delete(struct spdk_jsonrpc_request *request,
+spdk_rpc_bio_spdk_delete(struct spdk_jsonrpc_request *request,
 			 const struct spdk_json_val *params)
 {
-	struct rpc_delete_impl req = {NULL};
-	struct spdk_bdev *bdev;
+	struct rpc_delete_bio req = {NULL};
 
-	if (spdk_json_decode_object(params, rpc_delete_impl_decoders,
-				    SPDK_COUNTOF(rpc_delete_impl_decoders),
+	if (spdk_json_decode_object(params, rpc_delete_bio_decoders,
+				    SPDK_COUNTOF(rpc_delete_bio_decoders),
 				    &req)) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
 						 "spdk_json_decode_object failed");
 		goto cleanup;
 	}
 
-	bdev = spdk_bdev_get_by_name(req.name);
-	if (bdev == NULL) {
-		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
-		goto cleanup;
-	}
-
-	bdev_tcmur_delete(bdev, _spdk_rpc_bdev_impl_delete_cb, request);
-
-	free_rpc_delete_impl(&req);
-
-	return;
+	bio_spdk_delete(req.name, _spdk_rpc_bio_spdk_delete_cb, request);
 
 cleanup:
-	free_rpc_delete_impl(&req);
+	free_rpc_delete_bio(&req);
 }
-SPDK_RPC_REGISTER("bdev_tcmur_delete", spdk_rpc_bdev_impl_delete, SPDK_RPC_RUNTIME)
+
+SPDK_RPC_REGISTER("bio_spdk_delete", spdk_rpc_bio_spdk_delete, SPDK_RPC_RUNTIME)
