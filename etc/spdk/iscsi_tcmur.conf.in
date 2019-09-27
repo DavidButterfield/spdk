@@ -1,5 +1,7 @@
 # etc/spdk/iscsi_tcmur.conf.in
 # iSCSI target configuration file using tcmu-runner storage handlers
+#
+# NOTE: This file must be customized to suit your network addresses, etc.
 
 [Global]
   #SharedMemoryID 0
@@ -19,12 +21,7 @@
 # dev-name is arbitrary but should be unique across instances.
 # tcmu-runner handler name is derived from the first segment of tcmur-cfg-str.
 [TCMUR]
-# TCMUR 0 ram_a  /ram/tmp/tcmur_ram00
-# TCMUR 1 file_a /file//tmp/tcmur_file00
-
-# Use handler_file only, because it is faster than handler_ram
-  TCMUR 0 ram_a  /file//tmp/tcmur_ram00
-  TCMUR 1 file_a /file//tmp/tcmur_file00
+  TCMUR 0 file_a /file//tmp/tcmur_file00
 
 [Malloc]
   NumberOfLuns 1
@@ -64,5 +61,4 @@
   QueueDepth 64
   LUN0 Malloc0
   LUN1 AIO0
-  LUN2 ram_a
-  LUN3 file_a
+  LUN2 file_a

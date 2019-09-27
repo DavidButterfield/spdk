@@ -1,11 +1,17 @@
-(Refer to diagram in spdk_drbd.pdf)
+SPDK + DRBD + FUSE + TCMU-RUNNER HANDLERS -- David Butterfield -- Fri Sep 27 18:03:31 MDT 2019
+
+	[Updated with information about the FUSE interface and the new bio_spdk module,
+	 and to match revised example configurations and diagram]
+
+Refer to diagram at:
+https://raw.githubusercontent.com/DavidButterfield/spdk/tcmu-runner/spdk_drbd.pdf
 
 tcmu-runner block storage handlers running under SPDK
 =====================================================
 A prototype of a new block device module "bdev_tcmur" running under the Storage Performance
 Development Kit allows access to block storage using tcmu-runner handlers.  (tcmu-runner itself
 is not involved; only its loadable handlers are used here.)  The bdev_tcmur module is based on
-the bdev_aio module source.  It enables the pathways for LUN 2 and LUN 3 shown in the diagram.
+the bdev_aio module source.  It enables the pathway for LUN 2 shown in the diagram.
 
 Distributed Replicated Block Device (DRBD 9.0) running in usermode
 ==================================================================
@@ -13,22 +19,23 @@ A recent project ported DRBD from the kernel to run in usermode as a Linux proce
 support from emulated kernel functions and a multi-threaded engine based on epoll_wait().  The
 DRBD source code itself is unmodified, with its expected environment simulated around it.  It
 receives requests from clients through the kernel's block-I/O ("bio") protocol, and also makes
-requests to its backing storage using that same protocol.  Usermode DRBD can be plumbed under
-Usermode SCST (not shown in this diagram), or under a FUSE interface (drbd1 in the diagram).
+requests to its backing storage using that same protocol.
 
 DRBD running with SPDK
 ======================
 To bring usermode DRBD into an SPDK process, a new SPDK bdev module "bdev_bio" implements
-translation of SPDK block device requests into the kernel's block-I/O ("bio") protocol, as
-expected by DRBD.  This enables the pathways for LUN 4 and LUN 5 shown in the diagram.
+translation of SPDK block device requests into the kernel's "bio" protocol, as expected by DRBD.
+This enables the pathways for LUNs 3-6 shown in the diagram.
 
-DRBD then makes bio requests to its backing storage, which at present must be a tcmu-runner
-device.  To support arbitrary SPDK devices (e.g. use Malloc0 to back a DRBD device) requires a
-"bio_bdev" module to translate bio requests into SPDK bdev protocol.  (TBD)
+DRBD then makes bio requests to its backing storage (which therefore must implement the bio
+protocol).  This either can be bio_tcmur, to translate the bio calls into tcmu-runner calls, or
+it can be the bio_spdk module, which translates bio calls into SPDK bdev calls.  An SPDK bdev
+instance can then be configured behind the bio_spdk instance.  Examples are LUNs 4 and 6 shown
+in the diagram, where instances of bdev_malloc are configured behind bio_spdk.
 
-The SPDK configuration file plus an external helper provide enough for SPDK to configure DRBD
-with the devices needed by SPDK.  Once the SPDK+DRBD server is up and running, the DRBD logic
-can be controlled using the native DRBD management commands (drbdsetup and drbdadm).
+(The configurations for LUN 3 and LUN 4 would be silly in production, because they translate
+SPDK-to-bio and bio-to-SPDK back-to-back, but are useful for performance comparisons with other
+LUN configurations)
 
 The emulated kernel functions (UMC - usermode compatibility) make use of services provided by a
 multithreaded event engine (MTE) implemented around epoll_wait().  The MTE services are accessed
@@ -36,24 +43,55 @@ by UMC through an ops vector backed by MTE services for memory, time, and thread
 event polling of file descriptors, timers, and a FIFO of work to be done ASAP.  I anticipate an
 easy time converting the ops vector to point at a shim to SPDK services in place of MTE calls.
 
+FUSE/bio interface
+==================
+The bio block devices within the usermode server are visible through a mount of the server's UMC
+FUSE filesystem implementation.  Each device instance that implements the bio protocol (upward
+for its clients) is given an entry in /UMCfuse/dev/.  The example configuration has this look:
+
+$ ls -ld `find /UMCfuse`
+dr-xr-xr-x 4 root root          3 Sep 26 12:12 /UMCfuse
+dr-xr-xr-x 9 root root          8 Sep 26 12:13 /UMCfuse/dev
+-rw-rw---- 1 root root 1073672192 Sep 26 12:13 /UMCfuse/dev/drbd2
+-rw-rw---- 1 root root  134176768 Sep 26 12:13 /UMCfuse/dev/drbd3
+-rw-rw---- 1 root root 1073741824 Sep 26 12:13 /UMCfuse/dev/file_b
+-rw-rw---- 1 root root 1073741824 Sep 26 12:13 /UMCfuse/dev/file_c
+-rw-rw---- 1 root root  134217728 Sep 26 12:13 /UMCfuse/dev/Malloc1
+-rw-rw---- 1 root root  134217728 Sep 26 12:13 /UMCfuse/dev/Malloc2
+
+Each file represents an entire bio device; the examples are sized 1GiB and 128MiB.  These files
+can contain filesystems, e.g.:
+
+    sudo mkfs.ext4 /UMCfuse/dev/drbd2
+    sudo mount /UMCfuse/dev/drbd2 /mnt/x
+    cd /mnt/x
+
 Limitations
 ===========
 The implementation is very new.  So far I have mainly tested it using the SPDK iSCSI server,
-exporting tcmu-runner backend devices as SCSI LUNs.  That seems to work reliably.  The drbd and
-tcmur devices can alternatively be mounted locally through the FUSE interface, which also works.
+exporting tcmu-runner backend devices and replicated DRBD devices as SCSI LUNs.  That seems to
+work reliably.  The drbd and tcmur devices can alternatively be mounted locally through the FUSE
+interface, which also works.
+
+DRBD is configured using its native configuration utilities.  Some SPDK+DRBD configurations
+cannot be specified using SPDK .conf files; it is necessary to use JSON RPC in some cases.
+See "Configuring" below for more details.
 
 I have only tried it with one reactor core.
 
 This prototype implementation is clearly in need of some cleaning up and interfaces straightened
-out.  I've been studying SPDK for less then two weeks, and I guessed at a few things that I need
-to go back over carefully.  But it runs.
+out.  But it runs.
 
 The makefiles have optimizations turned off and debugs turned on.
 
-The UMC FUSE implementation is single-threaded and synchronous; thus it operates at an effective
-queue depth of one.  This matters most when using it to access replicated volumes with DRBD
-Protocol C, where performance will suffer significantly.  Accessing volumes with Protocol A
-configured to "pull-ahead" performs reasonably, as does accessing the same data through an iSCSI
+The fuse-tree node that represents a bio block device appears as a regular file rather than as a
+block device because otherwise FUSE directs I/O for that dev_t to the kernel device driver
+instead of to the FUSE filesystem server.
+
+The UMC FUSE implementation is presently single-threaded and synchronous; thus it operates at an
+effective queue depth of one.  This matters most when using it to write replicated volumes with
+DRBD Protocol C, where performance will suffer significantly.  Writing volumes with Protocol A
+configured to "pull-ahead" performs reasonably, as does writing the same data through an iSCSI
 LUN, which does not have the QD=1 limitation,
 
 NOTE: Only tcmu-runner modules handler_ram.so and handler_file.so have been tried so far; the
@@ -64,15 +102,8 @@ Usermode DRBD Limitations
 =========================
 Netlink multicast emulation not yet implemented, so anything like "drbdsetup wait*" hangs.
 
-The bio block device nodes are exposed through a mount of the server's UMC fuse filesystem
-implementation.  The fuse-tree node that represents a DRBD or TCMUR block device appears as a
-regular file rather than as a block device (because otherwise fuse directs I/O for that dev_t to
-the kernel instead of the fuse filesystem server).  So when communicating with a usermode
-server, the DRBD utilities are modified to omit the check that their device is S_IFBLK() rather
-than S_IFREG().
-
 Messages from the utilities and in the logs have not been modified, so will still refer to "the
-kernel" etc when referring to code that has been ported from the kernel to usermode.
+kernel" etc when referring to code that has been ported from the kernel to run in usermode.
 
 Resync may run noticeably slower when observing resync network traffic with tcpdump.
 
@@ -88,12 +119,14 @@ Bugs
 In general only the "happy path" has received any exercise -- expect bugs in untested error-
 handling logic.
 
-"Exclusive" opens aren't really exclusive, so be careful not to mount the same storage twice;
-for example /UMCfuse/dev/file_c and /UMCfuse/dev/drbd1 are the same storage in the example
-configuration.  For another example, SPDK configuration [BIO] for bdev_bio should never consume
-both drbd2 and ram_b concurrently.  "Holders" and "claims" are not yet implemented.
+Error messages are often opaque or hopelessly off-context.  (See also "Troubleshooting" later)
 
-The "writable" bits in the mode permissions do not appear correctly in /UMCfuse/dev.
+"Exclusive" opens aren't really exclusive, so be careful not to mount the same storage twice;
+for example /UMCfuse/dev/file_c and /UMCfuse/dev/drbd2 share the same underlying storage in the
+example configuration.  For another, SPDK iSCSI [targetnode] configuration should never consume
+bio_Malloc1 and Malloc1 concurrently.  "Holders" and "claims" are not yet implemented.
+
+The "writable" bits in the mode permissions do not appear correctly in /UMCfuse/dev/drbd*.
 
 The server apparently can mount and write a replicated DRBD device on a secondary node.
 
@@ -108,8 +141,8 @@ Probably there are broken untested refcountings on things that usually only get 
 
 Clean shutdown does not work at all.
 
-I always "make clean" before make, because my makefiles don't calculate dependencies right.  The
-makefiles are hateworthy.  SCST repository is unnecessarily tangled up with the build.
+The makefiles are hateworthy.  I always "make clean" before make, because my makefiles don't
+calculate dependencies right.  SCST repository is unnecessarily tangled up with the build.
 
 Sometimes DRBD resync doesn't start upon reconnect after restarting the server.  If it doesn't
 start, disconnecting + reconnecting to the peer usually gets it going.
@@ -126,60 +159,76 @@ it was trying to call through.)  I have never seen this happen with handler_ram.
 However, I have not seen the problem since I ensured adequate memory for the SPDK server.  The
 SPDK test machine has "only" 4GiB RAM, and swap space used was increasing during problem tests.
 Because handler_file runs significantly faster than handler_ram for mounted filesystems, all the
-tcmu-runner handler devices in the example are now by default configured to use handler_file,
-despite some names in /UMCfuse/dev and in /tmp continuing to be called "ram" rather than "file".
+tcmu-runner handler devices in the example configuration presently use handler_file.
 
 Building from Source Code
 =========================
 The source code to build SPDK with support for tcmu-runner handlers is in my forks of the SPDK
 and tcmu-runner repositories. Building-in DRBD support requires several additional repositories.
-Because building is presently a mess, I've included scripts that will download the repositories
-and build SPDK with support for tcmu-runner loadable handlers and/or DRBD.  To download and
-build the SPDK iSCSI server with support for BOTH, cd into an empty directory and do:
+Because building is presently a mess, I've included a script to download the repositories and
+build SPDK with support for tcmu-runner loadable handlers and DRBD.  cd into an empty directory
+and do:
 
     wget https://raw.githubusercontent.com/DavidButterfield/spdk/tcmu-runner/BUILD_spdk_drbd.sh
     chmod 755 BUILD_spdk_drbd.sh
     ./BUILD_spdk_drbd.sh
 
-To OMIT DRBD and only download/build SPDK with support for tcmu-runner handlers do this instead:
+The script builds SPDK with support for both DRBD and tcmu-runner handlers (first line below).
+You can reconfigure to omit DRBD support (which is an order of magnitude more complex than the
+tcmu-runner support).  Or build a regular iSCSI server by omitting both of these options:
 
-    wget https://raw.githubusercontent.com/DavidButterfield/spdk/tcmu-runner/BUILD_spdk_tcmur.sh
-    chmod 755 BUILD_spdk_tcmur.sh
-    ./BUILD_spdk_tcmur.sh
+    --with-tcmur --with-drbd		# compile SPDK with DRBD and tcmu-runner support
+    --with-tcmur			# compile SPDK with tcmu-runner support only
 
-The (former) DRBD script downloads and builds a superset of what the (latter) TCMUR script does,
-and after the DRBD download you can specify to build the more limited server (to support TCMUR
-but not DRBD) by selection of configuration options:
-
-    --with-tcmur			# SPDK with tcmu-runner only
-    --with-tcmur --with-drbd		# SPDK with DRBD and tcmu-runner
-
-Comments in the download/build scripts document the process in case you want to do some steps
+Comments in the download/build script document the process in case you want to do the steps
 manually.  (It asks for the sudo password to install, so you might want to look at it first.)
 
-The SCRIPTS ASSUME you already have the tools and libraries installed such that you can build
+The SCRIPT ASSUMES you already have the tools and libraries installed such that you can build
 the standard SPDK, DRBD, and tcmu-runner repositories.  Some of the makefiles require various
 build tools -- here are package names I added to a fresh installation of Ubuntu 18.04 LTS to
 complete the build:
-
-    build-essential  g++  gcc  git  make  gdb  valgrind  cscope  exuberant-ctags
-    libfuse-dev  libaio-dev  libglib2.0-dev  libkmod-dev  libnl-3-dev  libnl-genl-3-dev
-    librbd-dev  autoconf  automake  flex  coccinelle  cmake
+    build-essential g++ gcc make cmake autoconf automake flex coccinelle
+    cscope exuberant-ctags git gdb valgrind
+    libfuse-dev libaio-dev libglib2.0-dev libkmod-dev libnl-3-dev libssl-dev
+    libnl-genl-3-dev libnuma-dev uuid-dev libcunit1-dev libpython-all-dev librbd-dev
 
 I always "make clean" before "make", because my makefiles don't calculate dependencies right.
 
-There should be no compile errors, but there will be some warnings in the DRBD code.  The build
-script documents a few that are expected and can be ignored for now.
+There should be no compile errors, but there will be some warnings during the usermode DRBD
+compile.  The build script documents a few that are expected and can be ignored for now.
 
 Configuring
 ===========
-The example config files in etc/drbd.d are from a node in my setup.  They will have to be
-modified to suit your network configuration, and put into /etc/drbd.d on your test system.
+DRBD is configured using its native configuration utilities.  Some SPDK+DRBD configurations
+cannot be specified using SPDK .conf files; it is necessary to use JSON RPC in some cases.
+For example when an SPDK device depends on a DRBD instance, and the DRBD instance depends on
+another SPDK device: the DRBD configuration utilities must run in the midst of the SPDK
+configuration.
 
-There is also a nasty "helper" script /usr/sbin/drbdadm_up_primary which at present can only
-bring up one specific SPDK/DRBD device in the example configuration.  To support a different
-configuration, that file probably needs updating (in addition to /etc/drbd.d/* and the SPDK
-configuration file).
+Using JSON RPC the SPDK configuration can be split into a phase occurring before the DRBD
+configuration and another phase after.  That is what is done by these example configuration
+scripts:
+    etc/spdk/iscsi_drbd.conf.sh.in		# configure SPDK with DRBD devices
+    etc/spdk/iscsi_drbd_tcmur.conf.sh.in	# configure SPDK with DRBD and tcmur devices
+
+The example DRBD .res files in etc/drbd.d are from a node in my setup.  Both these and the
+example SPDK config scripts must be modified to suit the names, IP addresses, etc in your
+network environment.  This example puts the modified SPDK config scripts into ${DIR}:
+
+    # Copy example DRBD resource configuration files to /etc/drbd.d
+    cp etc/drbd/*.res /etc/drbd.d
+
+    # Modify those copies to match your local names, IP addresses, etc.
+    ...
+
+    # Make copies of one or more desired SPDK configuration files from these provided:
+    mkdir ${DIR}
+    cp etc/spdk/iscsi_drbd_tcmur.conf.sh.in	${DIR}/iscsi_drbd_tcmur.conf.sh	# DRBD+TCMUR
+    cp etc/spdk/iscsi_drbd.conf.sh.in		${DIR}/iscsi_drbd.conf.sh	# DRBD only
+    cp etc/spdk/iscsi_tcmur.conf.in		${DIR}/iscsi_tcmur.conf		# TCMUR only
+
+    # Modify the selected copies to match your local names, IP addresses, etc.
+    ...
 
 Running
 =======
@@ -192,26 +241,37 @@ The utilities need the $UMC_FS_ROOT environment variable set to control the user
 instead of a kernel-based server.  But they also need to run superuser.  Keep in mind that the
 sudo program does not pass your shell environment through to the program given on its command
 line, unless you specify "sudo -E".  (Omitting the "-E" leads to bewildering non-sequitur error
-messages because the utility is trying to parse an earlier version of the command language)
+messages because the utility tries to parse an earlier version of the command language)
 
 Also the *server* needs the $UMC_FS_ROOT environment variable set, because it invokes the
 utilities through a "usermode helper", and they inherit the variable from the server.
 
-The download/build script ends with a suggested server command-line, that depends on which
-script you used.  The two scripts refer to different configuration files depending on whether
-DRBD support was selected or not.
+To run the full example configuration with DRBD devices and tcmu-runner devices:
+
+    export UMC_FS_ROOT=/UMCfuse
+    sudo -E app/iscsi_tgt/iscsi_tgt
+    sudo ${DIR}/iscsi_drbd_tcmur.conf.sh    # in another window
+
+Example DRBD/bdev_malloc configuration (LUNS 0, 4, and 6; no tcmu-runner devices):
+
+    export UMC_FS_ROOT=/UMCfuse
+    sudo -E app/iscsi_tgt/iscsi_tgt
+    sudo ${DIR}/iscsi_drbd.conf.sh	    # in another window
+
+Example tcmur-only configuration (LUNs 0, 1, and 2, no DRBD devices or MTE/UMC/bio support):
+
+    export UMC_FS_ROOT=/UMCfuse
+    sudo -E app/iscsi_tgt/iscsi_tgt -c ${DIR}/iscsi_tcmur.conf
 
 Troubleshooting
 ===============
-If you didn't read the sections "Configuring" and "Running" just above, read those.
-
-The implementation and configuration of SPDK+DRBD is an order of magnitude more complex than the
-relatively straightforward implementation of tcmu-runner handlers under SPDK.  You may wish to
-make sure the simpler case works before bringing in DRBD.
+If you haven't read the sections "Configuring" and "Running" just above, read those.
 
 Make sure your configuration files were suitably modified for your names, addresses, etc.
+This includes the ones in /etc/drbd.d as well as the ones you specify at server startup.
 
-Make sure you are running the server and the utilities with environment variable set:
+Make sure you are running the server and the DRBD utilities with environment variable set:
+
     export UMC_FS_ROOT=/UMCfuse
     sudo -E drbdadm ...		# -E to pass the environment variable through sudo
 
@@ -223,113 +283,41 @@ server log or output from a DRBD utility probably mean the environment variable 
     Parse error: 'disk | device | address | meta-disk | flexible-meta-disk' expected,
 	    but got 'node-id'
 
-/proc and /sys/module entries for the DRBD usermode server can be observed under /UMCfuse.
+If you have trouble with the full configuration try the simpler ones.
 
-After starting the server, a node should appear in /UMCfuse/dev for each bio or tcmu-runner
-device configured by SPDK.  DRBD resource "nonspdk" (drbd1) is not configured as an SPDK device.
-After the server is up the resource may be enabled using the native DRBD command, after which
-its node should appear under /UMCfuse/dev:
+After starting the server, /proc and /sys/module entries for the DRBD usermode server should be
+observable under /UMCfuse.  Also, a node should appear in /UMCfuse/dev for each bio block device
+configured.
 
-    drbdadm up nonspdk	    # assumes metadata previously created
-
-Multiple names can refer to the same underlying storage.  Referring to the diagram, LUN 5, bio1,
-/UMCfuse/dev/drbd2, and /UMCfuse/dev/ram_b all refer to the same underlying storage in
-/tmp/tcmur_ram01.  A filesystem can be mounted on an iSCSI initiator as LUN 5, or the same
-filesystem can be mounted locally, e.g.
+Multiple names can refer to the same underlying storage.  Referring to the diagram, LUN 5,
+bio_drbd2, /UMCfuse/dev/drbd2, and /UMCfuse/dev/file_c all refer to the same underlying storage
+in /tmp/tcmur_file02.  A filesystem can be mounted on an iSCSI initiator as LUN 5, or the same
+filesystem can be mounted locally through FUSE (see lower diagram on the PDF page), e.g.
 
     sudo mount /UMCfuse/dev/drbd2 /mnt/x
 
-One bug is that exclusive open is not currently exclusive, so be careful not to use storage
-multiple ways at the same time!
+NOTE: One bug is that exclusive open is not currently exclusive, so be careful not to use
+      storage multiple ways at the same time!
+
+Notice that /UMCfuse/dev/drbd2 is slightly smaller than /UMCfuse/dev/file_c, and likewise
+/UMCfuse/dev/drbd3 is slightly smaller than /UMCfuse/dev/Malloc2.  The file_c and Malloc2
+devices represent the entire storage space, whereas the drbd devices represent what is available
+to a filesystem after subtracting space taken (at the end of the device) by DRBD metadata.
+
+If the drbd3 device is to be used as a filesystem, then the mkfs must be done on the drbd3
+device, not on the Malloc2 device.  This is so mkfs will use the correct device size.  After
+that it will be possible to mount and observe the filesystem on either drbd3 or Malloc2; but
+modifying it when mounted on Malloc2 will leave drbd3 with incorrect metadata.  (Likewise file_c
+and drbd2).
+
+On the other hand, LUN6 and /UMCfuse/dev/drbd3 both serve the same data, and the data can be
+accessed alternately (not concurrently) via either path (through an initiator as LUN 6, or
+through the /UMCfuse/dev/drbd3 node).
 
 More Information
 ================
 The DRBD kernel source code ported to usermode is (within a dozen lines of) unmodified from the
 original code in the LINBIT repository, with its expected kernel environment simulated around
-it.  For more information about how that was done, see the README.md with diagrams at
-https://github.com/DavidButterfield/SCST-Usermode-Adaptation
-
-David Butterfield						Tue 17 Sep 2019 09:43:35 PM MDT
-
-################################################################################
-Here's what you *really* wanted to see :-)
-
-This stacktrace shows an incoming write request from an iSCSI initiator driving all the way down
-through DRBD to the tcmur layer.
-
-Because the tcmu-runner handler I used is synchronous and may block (nr_threads > 0), libtcmur
-hands the request off to a (non-SPDK) tcmur_submit thread by queueing the request and, if the
-tcmur_submit thread is idle, sending it a pthread_cond_signal as seen here:
-
-Thread 1 "reactor_0"
-#0  __pthread_cond_signal (cond=0x5555571014b8) at pthread_cond_signal.c:36
-#1  0x0000555555846a40 in tcmur_read (minor=3, task=0x5555589a1600, iov=0x5555589a16a8, niov=1, nbyte=4096, seekpos=2147221504) at libtcmur.c:379
-#2  0x0000555555843c74 in make_request (rq_unused=0x5555570f1a40, bio=0x5555584518c0) at UMC_bio_tcmur.c:201
-#3  0x00005555557e6ba2 in _submit_bio (bio=0x5555584518c0) at usermode_compat/src/UMC_bio.h:463
-
-#4  0x00005555557ec4ca in drbd_submit_req_private_bio (req=0x5555589a1300) at drbd_req.c:1531
-#5  0x00005555557ed0a3 in drbd_send_and_submit (device=0x7fffd4015400, req=0x5555589a1300) at drbd_req.c:1799
-#6  0x00005555557ed5ce in __drbd_make_request (device=0x7fffd4015400, bio=0x55555795ddc0, start_jif=44388845) at drbd_req.c:1854
-#7  0x00005555557ee2b8 in drbd_make_request (q=0x7fffd4007200, bio=0x55555795ddc0) at drbd_req.c:2206
-#8  0x00005555556107b1 in submit_bio (rw=0, bio=0x55555795ddc0) at usermode_compat/src/UMC_bio.h:457
-
-#9  0x00005555556114f1 in bdev_impl_readv (fdisk=0x5555561c5e10, ch=0x555557201b90, bdev_task=0x200006d8c8c8, iov=0x20003541f420, iovcnt=1,
-			nbytes=4096, offset=2147221504) at bdev_bio.c:244
-#10 0x0000555555611c98 in bdev_impl_get_buf_cb (ch=0x555557201b90, bdev_io=0x200006d8c580, success=true) at bdev_bio.c:427
-#11 0x0000555555631515 in _bdev_io_set_buf (bdev_io=0x200006d8c580, buf=0x20000c1ab180, len=4096) at bdev.c:589
-#12 0x0000555555631a8f in spdk_bdev_io_get_buf (bdev_io=0x200006d8c580, cb=0x555555611b9d <bdev_impl_get_buf_cb>, len=4096) at bdev.c:717
-#13 0x0000555555611dbc in _bdev_impl_submit_request (ch=0x555557201b90, bdev_io=0x200006d8c580) at bdev_bio.c:458
-#14 0x0000555555611e3f in bdev_impl_submit_request (ch=0x555557201b90, bdev_io=0x200006d8c580) at bdev_bio.c:478
-
-#15 0x00005555556334e9 in _spdk_bdev_io_do_submit (bdev_ch=0x555557461f60, bdev_io=0x200006d8c580) at bdev.c:1511
-#16 0x00005555556341ba in _spdk_bdev_io_submit (ctx=0x200006d8c580) at bdev.c:1837
-#17 0x000055555563447c in spdk_bdev_io_submit (bdev_io=0x200006d8c580) at bdev.c:1881
-#18 0x0000555555636670 in _spdk_bdev_readv_blocks_with_md (desc=0x5555560c3d10, ch=0x555557461f30, iov=0x20003541f420, iovcnt=1, md_buf=0x0,
-			offset_blocks=524224, num_blocks=1, cb=0x555555663308 <bdev_scsi_task_complete_cmd>, cb_arg=0x20003541f3c0) at bdev.c:2843
-#19 0x00005555556366c7 in spdk_bdev_readv_blocks (desc=0x5555560c3d10, ch=0x555557461f30, iov=0x20003541f420, iovcnt=1, offset_blocks=524224,
-			num_blocks=1, cb=0x555555663308 <bdev_scsi_task_complete_cmd>, cb_arg=0x20003541f3c0) at bdev.c:2852
-
-#20 0x0000555555663af5 in bdev_scsi_readwrite (task=0x20003541f3c0, lba=524224, xfer_len=1, is_read=true) at scsi_bdev.c:1355
-#21 0x00005555556642e2 in bdev_scsi_process_block (task=0x20003541f3c0) at scsi_bdev.c:1579
-#22 0x000055555566507b in spdk_bdev_scsi_execute (task=0x20003541f3c0) at scsi_bdev.c:1958
-
-#23 0x000055555566012c in _scsi_lun_execute_task (lun=0x555556179f10, task=0x20003541f3c0) at lun.c:178
-#24 0x000055555566025e in spdk_scsi_lun_execute_tasks (lun=0x555556179f10) at lun.c:217
-#25 0x000055555565f6dc in spdk_scsi_dev_queue_task (dev=0x555555bb1820 <g_devs>, task=0x20003541f3c0) at dev.c:282
-
-#26 0x0000555555649b9e in iscsi_queue_task (conn=0x7fffe41e9000, task=0x20003541f3c0) at iscsi.c:2875
-#27 0x000055555564a078 in iscsi_op_scsi_read (conn=0x7fffe41e9000, task=0x20003541f3c0) at iscsi.c:2956
-#28 0x000055555564a38e in iscsi_op_scsi (conn=0x7fffe41e9000, pdu=0x20001e93ab40) at iscsi.c:3030
-#29 0x000055555564e75b in spdk_iscsi_execute (conn=0x7fffe41e9000, pdu=0x20001e93ab40) at iscsi.c:4581
-#30 0x000055555564062a in iscsi_conn_handle_incoming_pdus (conn=0x7fffe41e9000) at conn.c:1385
-#31 0x0000555555640793 in iscsi_conn_sock_cb (arg=0x7fffe41e9000, group=0x5555561c5fe0, sock=0x555557135490) at conn.c:1417
-
-#32 0x00005555556784a3 in spdk_sock_group_impl_poll_count (group_impl=0x5555560c3510, group=0x5555561c5fe0, max_events=32) at sock.c:457
-#33 0x000055555567853a in spdk_sock_group_poll_count (group=0x5555561c5fe0, max_events=32) at sock.c:482
-#34 0x00005555556783aa in spdk_sock_group_poll (group=0x5555561c5fe0) at sock.c:433
-#35 0x000055555565b0ce in iscsi_poll_group_poll (ctx=0x5555560ceb00) at iscsi_subsystem.c:1169
-#36 0x000055555566bbbf in spdk_thread_poll (thread=0x555555f8d290, max_msgs=0, now=110763816167854) at thread.c:482
-
-#37 0x0000555555624aae in _spdk_reactor_run (arg=0x555555f92d40) at reactor.c:358
-#38 0x0000555555624e2e in spdk_reactors_start () at reactor.c:461
-#39 0x0000555555623209 in spdk_app_start (opts=0x7fffffffdd80, start_fn=0x555555591f60 <spdk_startup>, arg1=0x0) at app.c:690
-#40 0x00005555555920f5 in main (argc=3, argv=0x7fffffffdf18) at iscsi_tgt.c:112
-
-Here's the tcmur_submit thread, waking up in frame #2 and issuing the callout to the tcmu-runner
-handler function tcmu_ram_write().
-
-Using an asynchronous handler instead (nr_threads=0, untested), the I/O should drive all the way
-to the handler I/O submit function directly on the reactor thread, and frames #0 and #1 here
-would appear in place of frame #0 in the above stacktrace.
-
-Thread 12 "tcmur_submit"
-#0  0x00007ffff4095fdd in tcmu_ram_write () from /usr/local/lib/tcmu-runner/handler_ram.so
-#1  0x0000555555846603 in tcmur_write_submit (work=0x7ffd38000be0) at libtcmur.c:330
-
-#2  0x000055555583f6fc in _UMC_work_queue_thr (workq=0x555557101400, wq_name=0x555557101590 "tcmur_submit") at UMC_thread.c:385
-#3  0x000055555583f96d in UMC_work_queue_thr (v_workq=0x555557101400) at UMC_thread.c:415
-
-#4  0x000055555583e79d in UMC_kthread_fn (v_task=0x555557105400) at UMC_thread.c:236
-#5  0x000055555585fb07 in sys_thread_fn (env=0x555557105ac0) at mte_service.c:145
-#6  0x00007ffff6a966db in start_thread (arg=0x7fffe4ee3700) at pthread_create.c:463
-#7  0x00007ffff67bf88f in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:95
+it.  This built on earlier work porting the SCST SCSI server to usermode.  The README.md with
+diagrams at https://github.com/DavidButterfield/SCST-Usermode-Adaptation explains how that was
+done.

@@ -1,22 +1,22 @@
-# /etc/drbd.d/drbd3.res
+# /etc/drbd.d/spdk_drbd2.res
 
-resource drbd3 {
+resource spdk_drbd2 {
     on blackbox {
 	node-id			0;
-	address			192.168.1.22:7790;
+	address			192.168.1.22:7788;
 	volume 0 {
-	    device		drbd3 minor 3;
-	    disk		"/UMCfuse/dev/ram003";
+	    device		drbd2 minor 2;
+	    disk		"/UMCfuse/dev/ram001";
 	    meta-disk		internal;
 	}
     }
 
     on bottom {
 	node-id			2;
-	address			192.168.1.23:7790;
+	address			192.168.1.23:7788;
 	volume 0 {
-	    device		drbd3 minor 3;
-            disk		"/UMCfuse/dev/Malloc2";
+	    device		drbd2 minor 2;
+            disk		"/UMCfuse/dev/file_c";
 	    meta-disk		internal;
 	 }
     }

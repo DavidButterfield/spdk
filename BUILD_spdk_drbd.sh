@@ -1,4 +1,5 @@
 #!/bin/bash
+# Script updated:  Fri 27 Sep 2019 11:42:25 AM MDT
 #
 # To download the repositories and build SPDK to support DRBD and tcmu-runner
 # handlers:  make an empty directory and cd into it, then run this script.
@@ -6,14 +7,13 @@
 # This script assumes you already have the build tools and libraries installed
 # so that you can build the standard SPDK, DRBD, and tcmu-runner repositories.
 #
-# Script updated:  Mon Sep  9 10:18:55 MDT 2019
-
-### Some of the makefiles require various build tools -- here are package names
-### I added to a fresh installation of Ubuntu 18.04 LTS to complete the build:
-###
-###    build-essential g++ gcc git make gdb valgrind cscope exuberant-ctags
-###    libfuse-dev libaio-dev libglib2.0-dev libkmod-dev libnl-3-dev
-###    libnl-genl-3-dev librbd-dev autoconf automake flex coccinelle cmake
+# Here are package names I added to a fresh installation of Ubuntu 18.04 LTS
+# to complete the build:
+# sudo apt install
+#    build-essential g++ gcc make cmake autoconf automake flex coccinelle
+#    cscope exuberant-ctags git gdb valgrind librbd-dev
+#    libfuse-dev libaio-dev libglib2.0-dev libkmod-dev libnl-3-dev libssl-dev
+#    libnl-genl-3-dev libnuma-dev uuid-dev libcunit1-dev libpython-all-dev
 
 echo Getting sudo password at start of script rather than sometime later
 sudo echo Got sudo password
@@ -110,9 +110,6 @@ echo "Executable:  " `ls -l spdk/app/iscsi_tgt/iscsi_tgt`
 # Create backing files in /tmp for the default configuration
 echo ""
 echo -n "Creating default backing files in /tmp..."
-sudo truncate --size=1G /tmp/tcmur_ram00;    sudo chmod 666 /tmp/tcmur_ram00
-sudo truncate --size=1G /tmp/tcmur_ram01;    sudo chmod 666 /tmp/tcmur_ram01
-sudo truncate --size=1G /tmp/tcmur_ram02;    sudo chmod 666 /tmp/tcmur_ram02
 sudo truncate --size=1G /tmp/tcmur_file00;   sudo chmod 666 /tmp/tcmur_file00
 sudo truncate --size=1G /tmp/tcmur_file01;   sudo chmod 666 /tmp/tcmur_file01
 sudo truncate --size=1G /tmp/tcmur_file02;   sudo chmod 666 /tmp/tcmur_file02
@@ -132,10 +129,10 @@ echo "Use sudo -E to pass the environment variable from your shell through sudo"
 
 echo ""
 echo "To run example test configuration:"
-echo "    # Modify spdk/etc/spdk/iscsi_drbd.conf.sh.in to suit your environment"
+echo "    # Modify spdk/etc/spdk/iscsi_drbd_tcmur.conf.sh.in to suit your environment"
 echo "    export UMC_FS_ROOT=/UMCfuse"
 echo "    sudo -E spdk/app/iscsi_tgt/iscsi_tgt"
 echo ""
 echo "In another window:"
-echo "    sudo spdk/etc/spdk/iscsi_drbd.conf.sh.in"
+echo "    sudo spdk/etc/spdk/iscsi_drbd_tcmur.conf.sh.in"
 echo ""

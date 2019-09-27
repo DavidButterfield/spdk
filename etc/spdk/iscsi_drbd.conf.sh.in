@@ -1,17 +1,20 @@
 #!/bin/bash
 #
-# NOTE: This file must be customized for your names, addresses, etc before use!
-#
 # iscsi_drbd.conf.sh.in creates a configuration with bdev_malloc backing DRBD
 # (Distributed Replicated Block Device) running under SPDK in usermode.
-#
+
+# NOTE: This file must be customized for your names, addresses, etc before use!
+HOST=192.168.1.23
+MASK=192.168.1.0/24
+NAME=iqn.2016-06.io.spdk:disk1
+
 # DRBD uses the kernel's block-I/O (bio) protocol to communicate both upward
 # (toward clients) and downward (toward storage).
 #
 # The bdev_bio module translates SPDK bdev requests into bio bdev requests.
 # The bio_spdk module translates bio requests into SPDK bdev requests.
 #
-# This script creates a configuration with LUNs and {modules} configured as follows:
+# This script creates a configuration with LUNs and {modules} configured thus:
 # LUN SPDKname                  BIOname        BIOname              SPDKname
 # --- --------                  -------        -------              --------
 #  0  Malloc0     {bdev_malloc}
@@ -101,12 +104,12 @@ sleep 1         # Give SPDK config a little time to settle
 
 # Configure DRBD device drbd3 to use Malloc2
 export UMC_FS_ROOT=/UMCfuse
-        # From /etc/drbd.d/drbd3.res:
+        # From /etc/drbd.d/spdk_drbd3.res:
         #   device              drbd3 minor 3;
         #   disk                "/UMCfuse/dev/Malloc2";
-drbdadm create-md drbd3 --force
-drbdadm up drbd3
-drbdsetup primary drbd3 --force
+drbdadm create-md spdk_drbd3 --force
+drbdadm up spdk_drbd3
+drbdsetup primary spdk_drbd3 --force
 
 # Make bio bdevs Malloc1 and drbd3 accessible to SPDK iSCSI client
 sudo ${rootdir}/scripts/rpc.py load_config << //EOF//
@@ -148,7 +151,7 @@ sudo ${rootdir}/scripts/rpc.py load_config << //EOF//
             "tag": 1,
             "portals": [
               {
-                "host": "192.168.1.23",
+                "host": "${HOST}",
                 "port": "3260"
               }
             ]
@@ -162,14 +165,14 @@ sudo ${rootdir}/scripts/rpc.py load_config << //EOF//
               "ANY"
             ],
             "netmasks": [
-              "192.168.1.0/24"
+              "${MASK}"
             ]
           }
         },
         {
           "method": "construct_target_node",
           "params": {
-            "name": "iqn.2016-06.io.spdk:disk1",
+            "name": "${NAME}",
             "alias_name": "Data Disk1",
             "pg_ig_maps": [
               {
