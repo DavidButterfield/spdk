@@ -83,14 +83,10 @@ git clone https://github.com/DavidButterfield/SCST-Usermode-Adaptation.git
     ## usermode DRBD is done from other Makefiles passing in the appropriate
     ## flags to drbd-9.0/drbd/Makefile.usermode
     ## 
-    ## However, it is necessary to download some headers and compatibility code
-    ## external to the drbd-9.0 repository:
+    ## However, it is necessary to download some headers external to the
+    ## drbd-9.0 repository:
 (cd drbd-9.0; \
     make check-submods)
-
-# After that additional code gets downloaded, there is a patch to apply to it:
-(cd drbd-9.0/drbd/drbd-kernel-compat; \
-    patch -p1 < ../../PATCH.drbd-kernel-compat)
 
 # XXX Use of SCST directory is temporary until the Makefiles get straightened out
 (cd SCST-Usermode-Adaptation/usermode; \
